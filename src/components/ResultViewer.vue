@@ -1,10 +1,19 @@
 <script setup lang="ts">
-import { ref } from "vue"
+import { ref, computed, onMounted, watch } from "vue"
 import { useAppStore } from "@/stores/app"
 import { deskewImage, waitForOpenCV } from "@/lib/deskew"
+import type { RectDatum } from "@/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Progress } from "@/components/ui/progress"
+import {
+    Tooltip,
+    TooltipContent,
+    TooltipProvider,
+    TooltipTrigger,
+} from "@/components/ui/tooltip"
 import {
     Card,
     CardContent,
@@ -21,6 +30,11 @@ import {
     TableHeader,
     TableRow,
 } from "@/components/ui/table"
+import CorrectedImageViewer from "@/components/CorrectedImageViewer.vue"
+import {
+    loadSettings,
+    saveSettings,
+} from "@/lib/settings-cache"
 
 const store = useAppStore()
 const resultUrl = ref<string | null>(null)
@@ -28,6 +42,77 @@ const error = ref("")
 const hasRun = ref(false)
 const cvReady = ref(false)
 const cvLoading = ref(false)
+const showAlgoDetails = ref(false)
+const includeScaleBar = ref(false)
+
+onMounted(() => {
+    const cached = loadSettings()
+    if (cached) {
+        includeScaleBar.value = cached.includeScaleBar
+    }
+})
+
+watch(
+    [() => store.scalePxPerMm, includeScaleBar],
+    () => {
+        saveSettings({
+            scalePxPerMm: store.scalePxPerMm,
+            includeScaleBar: includeScaleBar.value,
+        })
+    },
+)
+
+// Progress tracking
+const progressStep = ref(0)
+const progressTotal = ref(7)
+const progressLabel = ref("")
+const progressPercent = computed(() =>
+    progressTotal.value > 0
+        ? Math.round((progressStep.value / progressTotal.value) * 100)
+        : 0,
+)
+
+// Estimated output size — accounts for full warped image, not just datum
+const MAX_RGBA_MB = 512
+const estimatedOutput = computed(() => {
+    const primary = store.datums.find(
+        (d): d is RectDatum => d.type === "rectangle",
+    )
+    const img = store.loadedImage
+    if (!primary || !img || store.scalePxPerMm <= 0) return null
+
+    // Datum dimensions in output pixels
+    const datumOutW = primary.widthMm * store.scalePxPerMm
+    const datumOutH = primary.heightMm * store.scalePxPerMm
+
+    // Datum dimensions in source pixels (approximate from corner spread)
+    const c = primary.corners
+    const datumSrcW = Math.max(
+        Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y),
+        Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y),
+    )
+    const datumSrcH = Math.max(
+        Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y),
+        Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y),
+    )
+
+    // Scale factor from source to output (per-axis average)
+    const sx =
+        datumSrcW > 0 ? datumOutW / datumSrcW : store.scalePxPerMm
+    const sy =
+        datumSrcH > 0 ? datumOutH / datumSrcH : store.scalePxPerMm
+    const avgScale = (sx + sy) / 2
+
+    // Estimated full warped output = source image scaled
+    const w = Math.round(img.naturalWidth * avgScale)
+    const h = Math.round(img.naturalHeight * avgScale)
+    const mb = (w * h * 4) / (1024 * 1024)
+    return { w, h, mb, datumW: Math.round(datumOutW), datumH: Math.round(datumOutH) }
+})
+
+const tooLarge = computed(
+    () => (estimatedOutput.value?.mb ?? 0) > MAX_RGBA_MB,
+)
 
 async function ensureOpenCV() {
     if (cvReady.value) return
@@ -49,12 +134,27 @@ async function runDeskew() {
         await ensureOpenCV()
 
         store.processingStatus = "Running perspective correction..."
+        progressStep.value = 0
+        progressLabel.value = "Starting..."
+        // Yield to let the browser repaint the spinner before heavy work
+        await new Promise((r) => {
+            requestAnimationFrame(r)
+        })
+        await new Promise((r) => {
+            requestAnimationFrame(r)
+        })
 
         const result = await deskewImage({
             image: store.loadedImage,
             datums: store.datums,
             exif: store.exifData,
             scalePxPerMm: store.scalePxPerMm,
+            onProgress: (step, total, label) => {
+                progressStep.value = step
+                progressTotal.value = total
+                progressLabel.value = label
+                store.processingStatus = label
+            },
         })
 
         store.setResult(result)
@@ -69,12 +169,118 @@ async function runDeskew() {
     }
 }
 
-function download() {
-    if (!resultUrl.value) return
+function addScaleBar(image: HTMLImageElement): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+        const iw = image.naturalWidth
+        const ih = image.naturalHeight
+        const scale = store.scalePxPerMm
+
+        const unit = Math.max(iw / 100, 8)
+        const barHeightPx = Math.round(unit * 5)
+        const canvas = document.createElement("canvas")
+        canvas.width = iw
+        canvas.height = ih + barHeightPx
+
+        const ctx = canvas.getContext("2d")
+        if (!ctx) {
+            reject(new Error("No 2D context"))
+            return
+        }
+
+        ctx.drawImage(image, 0, 0)
+
+        ctx.fillStyle = "#000"
+        ctx.fillRect(0, ih, iw, barHeightPx)
+
+        const imgWidthMm = iw / scale
+        const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
+        const targetMm = imgWidthMm * 0.2
+        let barMm = niceSteps[0] ?? 10
+        for (const s of niceSteps) {
+            barMm = s
+            if (s >= targetMm) break
+        }
+        const barWidthPx = barMm * scale
+
+        const margin = Math.round(unit * 2)
+        const barX = margin
+        const barY = ih + barHeightPx / 2
+        const barThick = Math.max(Math.round(unit * 0.6), 4)
+        const tickH = Math.round(unit * 1.5)
+        const tickW = Math.max(2, Math.round(unit * 0.15))
+
+        ctx.fillStyle = "#fff"
+        ctx.fillRect(barX, barY - barThick / 2, barWidthPx, barThick)
+        ctx.fillRect(barX, barY - tickH / 2, tickW, tickH)
+        ctx.fillRect(
+            barX + barWidthPx - tickW,
+            barY - tickH / 2,
+            tickW,
+            tickH,
+        )
+
+        const fontSize = Math.round(unit * 1.4)
+        ctx.font = `bold ${String(fontSize)}px monospace`
+        ctx.fillStyle = "#fff"
+        ctx.textAlign = "center"
+        ctx.textBaseline = "bottom"
+        ctx.fillText(
+            `${String(barMm)} mm`,
+            barX + barWidthPx / 2,
+            barY - tickH / 2 - Math.round(unit * 0.3),
+        )
+
+        const smallFont = Math.round(unit * 1)
+        ctx.textAlign = "right"
+        ctx.textBaseline = "middle"
+        ctx.font = `${String(smallFont)}px monospace`
+        ctx.fillStyle = "rgba(255,255,255,0.6)"
+        ctx.fillText(`${String(scale)} px/mm`, iw - margin, barY)
+
+        canvas.toBlob((b) => {
+            if (b) resolve(b)
+            else reject(new Error("toBlob failed"))
+        }, "image/png")
+    })
+}
+
+async function download() {
+    if (!store.deskewResult) return
+
+    let blob: Blob = store.deskewResult.correctedImageBlob
+
+    if (includeScaleBar.value) {
+        // Load the corrected image into an HTMLImageElement for drawing
+        const imgUrl = URL.createObjectURL(
+            store.deskewResult.correctedImageBlob,
+        )
+        try {
+            const image = await new Promise<HTMLImageElement>(
+                (resolve, reject) => {
+                    const el = new Image()
+                    el.onload = () => {
+                        resolve(el)
+                    }
+                    el.onerror = () => {
+                        reject(new Error("Failed to load image"))
+                    }
+                    el.src = imgUrl
+                },
+            )
+            blob = await addScaleBar(image)
+        } finally {
+            URL.revokeObjectURL(imgUrl)
+        }
+    }
+
+    const url = URL.createObjectURL(blob)
     const a = document.createElement("a")
-    a.href = resultUrl.value
-    a.download = `skwik-${store.originalFile?.name ?? "output"}.png`
+    a.href = url
+    const baseName =
+        store.originalFile?.name.replace(/\.[^.]+$/, "") ?? "output"
+    a.download = `${baseName}-skwik.png`
     a.click()
+    URL.revokeObjectURL(url)
 }
 
 function hasRects(): boolean {
@@ -92,7 +298,9 @@ function hasRects(): boolean {
                     download.
                 </p>
             </div>
-            <Button variant="outline" @click="store.goToStep(3)">Back</Button>
+            <Button variant="outline" @click="store.goToStep(3)"
+                >Back</Button
+            >
         </div>
 
         <!-- Scale setting -->
@@ -100,8 +308,8 @@ function hasRects(): boolean {
             <CardHeader>
                 <CardTitle class="text-base">Output Scale</CardTitle>
                 <CardDescription>
-                    Pixels per millimeter in the corrected output image. Higher
-                    = larger output.
+                    Pixels per millimeter in the corrected output image.
+                    Higher = larger output.
                 </CardDescription>
             </CardHeader>
             <CardContent>
@@ -111,13 +319,45 @@ function hasRects(): boolean {
                         :model-value="String(store.scalePxPerMm)"
                         type="number"
                         min="1"
-                        class="w-28"
+                        class="w-28 font-mono"
                         @update:model-value="
                             (v: string | number) =>
                                 (store.scalePxPerMm = Number(v) || 10)
                         "
                     />
-                    <span class="text-sm text-muted-foreground">px / mm</span>
+                    <span class="font-mono text-sm text-muted-foreground"
+                        >px/mm</span
+                    >
+                </div>
+                <!-- Estimated output size -->
+                <div
+                    v-if="estimatedOutput"
+                    class="mt-3 space-y-1 text-sm"
+                    :class="
+                        tooLarge
+                            ? 'text-destructive'
+                            : 'text-muted-foreground'
+                    "
+                >
+                    <p>
+                        Est. output:
+                        <span class="font-mono"
+                            >~{{ estimatedOutput.w }}&times;{{
+                                estimatedOutput.h
+                            }}px</span
+                        >
+                        &ensp;&mdash;&ensp;
+                        <span class="font-mono"
+                            >~{{
+                                estimatedOutput.mb.toFixed(0)
+                            }} MB</span
+                        >
+                        RAM
+                    </p>
+                    <p v-if="tooLarge" class="font-medium">
+                        Exceeds {{ MAX_RGBA_MB }} MB limit &mdash;
+                        lower the scale or use a smaller source image.
+                    </p>
                 </div>
             </CardContent>
         </Card>
@@ -137,27 +377,36 @@ function hasRects(): boolean {
                         v-for="datum in store.datums"
                         :key="datum.id"
                         variant="outline"
+                        class="font-normal"
                     >
                         {{ datum.label }}
-                        ({{
+                        <span class="ml-1 font-mono text-xs">{{
                             datum.type === "rectangle"
                                 ? `${datum.widthMm}\u00D7${datum.heightMm}mm`
                                 : `${datum.lengthMm}mm`
-                        }}) &mdash; confidence {{ datum.confidence }}/5
+                        }}</span>
+                        <span class="ml-1 text-muted-foreground"
+                            >conf {{ datum.confidence }}/5</span
+                        >
                     </Badge>
                 </div>
-                <p v-if="!hasRects()" class="mt-3 text-sm text-destructive">
+                <p
+                    v-if="!hasRects()"
+                    class="mt-3 text-sm text-destructive"
+                >
                     At least one rectangle datum is required for perspective
                     correction.
                 </p>
             </CardContent>
         </Card>
 
-        <!-- Run button -->
+        <!-- Run button + progress -->
         <div class="flex flex-col items-center gap-3">
             <Button
                 size="lg"
-                :disabled="store.isProcessing || !hasRects()"
+                :disabled="
+                    store.isProcessing || !hasRects() || tooLarge
+                "
                 @click="runDeskew"
             >
                 <template v-if="store.isProcessing">
@@ -191,6 +440,20 @@ function hasRects(): boolean {
                     }}
                 </template>
             </Button>
+
+            <!-- Progress bar -->
+            <div
+                v-if="store.isProcessing"
+                class="w-full max-w-sm space-y-1.5"
+            >
+                <Progress :model-value="progressPercent" class="h-2" />
+                <p
+                    class="text-center font-mono text-xs text-muted-foreground"
+                >
+                    [{{ progressStep + 1 }}/{{ progressTotal }}]
+                    {{ progressLabel }}
+                </p>
+            </div>
         </div>
 
         <p v-if="error" class="text-center text-sm text-destructive">
@@ -198,7 +461,7 @@ function hasRects(): boolean {
         </p>
 
         <!-- Result -->
-        <template v-if="store.deskewResult">
+        <template v-if="store.deskewResult && resultUrl">
             <!-- Diagnostics -->
             <Card>
                 <CardHeader>
@@ -208,24 +471,60 @@ function hasRects(): boolean {
                         <strong>{{
                             store.deskewResult.diagnostics.primaryDatum
                         }}</strong>
-                        &ensp;&bull;&ensp; Output:
-                        {{
-                            store.deskewResult.diagnostics.outputWidthPx
-                        }}&times;{{
-                            store.deskewResult.diagnostics.outputHeightPx
-                        }}px
+                        <span class="mx-1 text-muted-foreground/50"
+                            >|</span
+                        >
+                        Output:
+                        <span class="font-mono"
+                            >{{
+                                store.deskewResult.diagnostics.outputWidthPx
+                            }}&times;{{
+                                store.deskewResult.diagnostics.outputHeightPx
+                            }}px</span
+                        >
+                        <span class="mx-1 text-muted-foreground/50"
+                            >|</span
+                        >
+                        <span class="font-mono"
+                            >{{
+                                (
+                                    store.deskewResult.diagnostics
+                                        .outputWidthPx / store.scalePxPerMm
+                                ).toFixed(1)
+                            }}&times;{{
+                                (
+                                    store.deskewResult.diagnostics
+                                        .outputHeightPx / store.scalePxPerMm
+                                ).toFixed(1)
+                            }}mm</span
+                        >
+                        <span class="mx-1 text-muted-foreground/50"
+                            >|</span
+                        >
+                        <span class="font-mono"
+                            >{{
+                                (
+                                    store.deskewResult.correctedImageBlob
+                                        .size /
+                                    1024 /
+                                    1024
+                                ).toFixed(1)
+                            }} MB</span
+                        >
                     </CardDescription>
                 </CardHeader>
                 <CardContent class="space-y-4">
                     <!-- Axis corrections -->
                     <div class="grid grid-cols-2 gap-4">
-                        <div class="rounded-md border p-3">
+                        <div
+                            class="rounded-md border border-border/50 p-3"
+                        >
                             <p
-                                class="text-xs font-medium text-muted-foreground"
+                                class="text-xs font-medium uppercase tracking-wide text-muted-foreground"
                             >
                                 X-axis correction
                             </p>
-                            <p class="text-lg font-semibold">
+                            <p class="font-mono text-lg font-semibold">
                                 {{
                                     (
                                         store.deskewResult.diagnostics
@@ -233,22 +532,25 @@ function hasRects(): boolean {
                                     ).toFixed(2)
                                 }}%
                             </p>
-                            <p class="text-xs text-muted-foreground">
-                                weight:
-                                {{
+                            <p
+                                class="font-mono text-xs text-muted-foreground"
+                            >
+                                w={{
                                     store.deskewResult.diagnostics.xCorrection.totalWeight.toFixed(
                                         1,
                                     )
                                 }}
                             </p>
                         </div>
-                        <div class="rounded-md border p-3">
+                        <div
+                            class="rounded-md border border-border/50 p-3"
+                        >
                             <p
-                                class="text-xs font-medium text-muted-foreground"
+                                class="text-xs font-medium uppercase tracking-wide text-muted-foreground"
                             >
                                 Y-axis correction
                             </p>
-                            <p class="text-lg font-semibold">
+                            <p class="font-mono text-lg font-semibold">
                                 {{
                                     (
                                         store.deskewResult.diagnostics
@@ -256,9 +558,10 @@ function hasRects(): boolean {
                                     ).toFixed(2)
                                 }}%
                             </p>
-                            <p class="text-xs text-muted-foreground">
-                                weight:
-                                {{
+                            <p
+                                class="font-mono text-xs text-muted-foreground"
+                            >
+                                w={{
                                     store.deskewResult.diagnostics.yCorrection.totalWeight.toFixed(
                                         1,
                                     )
@@ -270,7 +573,8 @@ function hasRects(): boolean {
                     <!-- Per-datum table -->
                     <Table
                         v-if="
-                            store.deskewResult.diagnostics.perDatum.length > 0
+                            store.deskewResult.diagnostics.perDatum.length >
+                            0
                         "
                     >
                         <TableHeader>
@@ -283,32 +587,36 @@ function hasRects(): boolean {
                                 <TableHead class="text-right"
                                     >Measured (mm)</TableHead
                                 >
-                                <TableHead class="text-right">Error</TableHead>
+                                <TableHead class="text-right"
+                                    >Error</TableHead
+                                >
                                 <TableHead>Axis</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
                             <TableRow
-                                v-for="report in store.deskewResult.diagnostics
-                                    .perDatum"
+                                v-for="report in store.deskewResult
+                                    .diagnostics.perDatum"
                                 :key="report.label"
                             >
                                 <TableCell class="font-medium">{{
                                     report.label
                                 }}</TableCell>
                                 <TableCell>
-                                    <Badge variant="outline" class="text-xs">{{
-                                        report.type
-                                    }}</Badge>
+                                    <Badge
+                                        variant="outline"
+                                        class="text-xs"
+                                        >{{ report.type }}</Badge
+                                    >
                                 </TableCell>
-                                <TableCell class="text-right">{{
+                                <TableCell class="font-mono text-right">{{
                                     report.expectedMm.toFixed(1)
                                 }}</TableCell>
-                                <TableCell class="text-right">{{
+                                <TableCell class="font-mono text-right">{{
                                     report.measuredMm.toFixed(1)
                                 }}</TableCell>
                                 <TableCell
-                                    class="text-right"
+                                    class="font-mono text-right"
                                     :class="
                                         report.errorPercent > 5
                                             ? 'text-destructive'
@@ -326,45 +634,185 @@ function hasRects(): boolean {
                 </CardContent>
             </Card>
 
-            <!-- Corrected image -->
-            <Card>
-                <CardHeader>
-                    <CardTitle class="text-base">Corrected Image</CardTitle>
-                </CardHeader>
-                <CardContent>
-                    <div
-                        class="flex items-center justify-center overflow-hidden rounded-md bg-muted"
+            <!-- Algorithm explanation -->
+            <Card class="border-border/40">
+                <CardContent class="pb-5 pt-5">
+                    <button
+                        class="flex w-full items-center gap-2 text-left text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+                        @click="
+                            showAlgoDetails = !showAlgoDetails
+                        "
                     >
-                        <img
-                            v-if="resultUrl"
-                            :src="resultUrl"
-                            alt="Corrected image"
-                            class="max-h-[500px] w-full object-contain"
-                        />
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            class="shrink-0 transition-transform duration-200"
+                            :class="
+                                showAlgoDetails
+                                    ? 'rotate-90'
+                                    : ''
+                            "
+                        >
+                            <path d="m9 18 6-6-6-6" />
+                        </svg>
+                        How the algorithm works
+                    </button>
+                    <div
+                        v-show="showAlgoDetails"
+                        class="mt-4 pl-6"
+                    >
+                        <ol
+                            class="list-decimal space-y-2 text-sm leading-relaxed text-muted-foreground marker:font-semibold marker:text-foreground/60"
+                        >
+                            <li>
+                                The primary rectangle datum
+                                defines a
+                                <strong
+                                    class="text-foreground/80"
+                                    >homography</strong
+                                >
+                                &mdash; a 3&times;3 projective
+                                transform mapping the
+                                quadrilateral in the source
+                                image to a true rectangle at
+                                the specified real-world
+                                dimensions.
+                            </li>
+                            <li>
+                                Secondary datums (additional
+                                rectangles or line segments)
+                                provide
+                                <strong
+                                    class="text-foreground/80"
+                                    >weighted correction
+                                    factors</strong
+                                >
+                                for the X and Y axes. Each
+                                secondary datum's contribution
+                                is weighted by its confidence
+                                score, refining the scale in
+                                each axis independently.
+                            </li>
+                            <li>
+                                The final correction is applied
+                                as a single
+                                <code
+                                    class="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground"
+                                    >cv::warpPerspective</code
+                                >
+                                call via OpenCV WASM, producing
+                                the output image at the
+                                requested px/mm scale.
+                            </li>
+                        </ol>
                     </div>
                 </CardContent>
             </Card>
 
-            <div class="flex justify-center pb-8">
-                <Button size="lg" @click="download">
-                    <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="18"
-                        height="18"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        class="mr-2"
+            <!-- Corrected image with tools -->
+            <Card>
+                <CardHeader>
+                    <CardTitle class="text-base"
+                        >Corrected Image</CardTitle
                     >
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                        <polyline points="7 10 12 15 17 10" />
-                        <line x1="12" x2="12" y1="15" y2="3" />
-                    </svg>
-                    Download PNG
-                </Button>
+                </CardHeader>
+                <CardContent>
+                    <CorrectedImageViewer
+                        :image-url="resultUrl"
+                        :scale-px-per-mm="store.scalePxPerMm"
+                    />
+                </CardContent>
+            </Card>
+
+            <!-- Download -->
+            <div class="flex flex-col items-center gap-3 pb-8">
+                <TooltipProvider>
+                    <Tooltip>
+                        <TooltipTrigger as-child>
+                            <label
+                                class="flex cursor-pointer items-center gap-2"
+                            >
+                                <Checkbox
+                                    id="scale-bar-check"
+                                    :checked="includeScaleBar"
+                                    @update:checked="
+                                        (v: boolean) =>
+                                            (includeScaleBar = v)
+                                    "
+                                />
+                                <Label
+                                    for="scale-bar-check"
+                                    class="cursor-pointer text-sm text-muted-foreground"
+                                    >Include scale bar in export</Label
+                                >
+                            </label>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" class="max-w-xs">
+                            Appends a black bar at the bottom of the
+                            exported image with a measurement scale and
+                            px/mm annotation.
+                        </TooltipContent>
+                    </Tooltip>
+                </TooltipProvider>
+                <div class="flex items-center gap-3">
+                    <Button size="lg" @click="download">
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            class="mr-2"
+                        >
+                            <path
+                                d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"
+                            />
+                            <polyline points="7 10 12 15 17 10" />
+                            <line
+                                x1="12"
+                                x2="12"
+                                y1="15"
+                                y2="3"
+                            />
+                        </svg>
+                        Download PNG
+                    </Button>
+                    <Button
+                        size="lg"
+                        variant="outline"
+                        @click="store.reset()"
+                    >
+                        Process New Image
+                    </Button>
+                </div>
+                <p
+                    class="font-mono text-sm text-muted-foreground"
+                >
+                    {{
+                        store.deskewResult.diagnostics.outputWidthPx
+                    }}&times;{{
+                        store.deskewResult.diagnostics.outputHeightPx
+                    }} px &mdash;
+                    {{
+                        (
+                            store.deskewResult
+                                .correctedImageBlob.size /
+                            1024 /
+                            1024
+                        ).toFixed(1)
+                    }} MB
+                </p>
             </div>
         </template>
     </div>
