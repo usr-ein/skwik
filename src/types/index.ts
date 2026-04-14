@@ -49,6 +49,8 @@ export interface DeskewInput {
     exif: ExifData
     /** Output pixels per mm. */
     scalePxPerMm: number
+    /** Called with (stepIndex 0-based, totalSteps, stepLabel) */
+    onProgress?: (step: number, total: number, label: string) => void
 }
 
 export interface AxisCorrection {
