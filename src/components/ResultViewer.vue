@@ -3,10 +3,10 @@ import { ref, computed, onMounted, watch } from "vue"
 import { useAppStore } from "@/stores/app"
 import { deskewImage, waitForOpenCV } from "@/lib/deskew"
 import type { RectDatum } from "@/types"
+import { DEFAULT_SCALE_PX_PER_MM } from "@/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Checkbox } from "@/components/ui/checkbox"
 import { Progress } from "@/components/ui/progress"
 import {
     Tooltip,
@@ -44,12 +44,71 @@ const cvReady = ref(false)
 const cvLoading = ref(false)
 const showAlgoDetails = ref(false)
 const includeScaleBar = ref(false)
+const scaleInput = ref(String(store.scalePxPerMm))
+const scaleValid = computed(() => {
+    const n = Number(scaleInput.value)
+    return Number.isFinite(n) && n > 0
+})
+
+watch(scaleInput, (v) => {
+    const n = Number(v)
+    if (Number.isFinite(n) && n > 0) {
+        store.scalePxPerMm = n
+    }
+})
+
+const MAX_AUTO_SCALE_DIM = 8192
+
+function computeAutoScale(): number {
+    const img = store.loadedImage
+    const primary = store.datums.find(
+        (d): d is RectDatum => d.type === "rectangle",
+    )
+    if (!img || !primary) return DEFAULT_SCALE_PX_PER_MM
+
+    // Approximate source-pixel size of the datum
+    const c = primary.corners
+    const datumSrcW = Math.max(
+        Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y),
+        Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y),
+    )
+    const datumSrcH = Math.max(
+        Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y),
+        Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y),
+    )
+
+    // Scale that would make the datum the same pixel size as in source
+    const sx =
+        datumSrcW > 0 ? datumSrcW / primary.widthMm : 0
+    const sy =
+        datumSrcH > 0 ? datumSrcH / primary.heightMm : 0
+    let autoScale = Math.max(sx, sy)
+
+    // Clamp so the full output doesn't exceed MAX_AUTO_SCALE_DIM
+    const estW = img.naturalWidth * autoScale / Math.max(datumSrcW / primary.widthMm, 0.001)
+    const estH = img.naturalHeight * autoScale / Math.max(datumSrcH / primary.heightMm, 0.001)
+    if (estW > MAX_AUTO_SCALE_DIM || estH > MAX_AUTO_SCALE_DIM) {
+        autoScale *= MAX_AUTO_SCALE_DIM / Math.max(estW, estH)
+    }
+
+    // Round to a clean number
+    return Math.max(1, Math.round(autoScale * 10) / 10)
+}
 
 onMounted(() => {
     const cached = loadSettings()
     if (cached) {
         includeScaleBar.value = cached.includeScaleBar
+        // Only use cached scale if it was explicitly set before
+        if (cached.scalePxPerMm !== DEFAULT_SCALE_PX_PER_MM) {
+            scaleInput.value = String(cached.scalePxPerMm)
+            return
+        }
     }
+    // Auto-compute a sensible default scale
+    const auto = computeAutoScale()
+    store.scalePxPerMm = auto
+    scaleInput.value = String(auto)
 })
 
 watch(
@@ -249,6 +308,7 @@ async function download() {
 
     let blob: Blob = store.deskewResult.correctedImageBlob
 
+    console.log("[download] includeScaleBar =", includeScaleBar.value)
     if (includeScaleBar.value) {
         // Load the corrected image into an HTMLImageElement for drawing
         const imgUrl = URL.createObjectURL(
@@ -316,13 +376,18 @@ function hasRects(): boolean {
                 <div class="flex items-center gap-3">
                     <Label>Scale</Label>
                     <Input
-                        :model-value="String(store.scalePxPerMm)"
+                        :model-value="scaleInput"
                         type="number"
                         min="1"
                         class="w-28 font-mono"
+                        :class="
+                            scaleValid
+                                ? ''
+                                : 'border-destructive ring-destructive/30 ring-2'
+                        "
                         @update:model-value="
                             (v: string | number) =>
-                                (store.scalePxPerMm = Number(v) || 10)
+                                (scaleInput = String(v))
                         "
                     />
                     <span class="font-mono text-sm text-muted-foreground"
@@ -354,7 +419,10 @@ function hasRects(): boolean {
                         >
                         RAM
                     </p>
-                    <p v-if="tooLarge" class="font-medium">
+                    <p v-if="!scaleValid" class="font-medium text-destructive">
+                        Enter a valid scale &gt; 0.
+                    </p>
+                    <p v-else-if="tooLarge" class="font-medium">
                         Exceeds {{ MAX_RGBA_MB }} MB limit &mdash;
                         lower the scale or use a smaller source image.
                     </p>
@@ -405,7 +473,10 @@ function hasRects(): boolean {
             <Button
                 size="lg"
                 :disabled="
-                    store.isProcessing || !hasRects() || tooLarge
+                    store.isProcessing ||
+                    !hasRects() ||
+                    tooLarge ||
+                    !scaleValid
                 "
                 @click="runDeskew"
             >
@@ -737,20 +808,16 @@ function hasRects(): boolean {
                     <Tooltip>
                         <TooltipTrigger as-child>
                             <label
-                                class="flex cursor-pointer items-center gap-2"
+                                class="flex cursor-pointer items-center gap-2 select-none"
                             >
-                                <Checkbox
-                                    id="scale-bar-check"
-                                    :checked="includeScaleBar"
-                                    @update:checked="
-                                        (v: boolean) =>
-                                            (includeScaleBar = v)
-                                    "
+                                <input
+                                    v-model="includeScaleBar"
+                                    type="checkbox"
+                                    class="h-4 w-4 accent-primary"
                                 />
-                                <Label
-                                    for="scale-bar-check"
-                                    class="cursor-pointer text-sm text-muted-foreground"
-                                    >Include scale bar in export</Label
+                                <span
+                                    class="text-sm text-muted-foreground"
+                                    >Include scale bar in export</span
                                 >
                             </label>
                         </TooltipTrigger>
