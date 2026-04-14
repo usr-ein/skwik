@@ -6,20 +6,44 @@ import ExifViewer from "@/components/ExifViewer.vue"
 import DatumEditor from "@/components/DatumEditor.vue"
 import ResultViewer from "@/components/ResultViewer.vue"
 import ThemeToggle from "@/components/ThemeToggle.vue"
+import SkwikLogo from "@/components/SkwikLogo.vue"
 
 const store = useAppStore()
 </script>
 
 <template>
     <div class="min-h-screen bg-background text-foreground">
+        <!-- Gitea fork ribbon — top-left, desktop only -->
+        <a
+            href="https://serv.e1n.sh/git/sam1902/skwik"
+            target="_blank"
+            rel="noopener"
+            class="github-fork-ribbon fixed left-0 top-0 z-[100] hidden md:block"
+            data-ribbon="Fork me on Gitea"
+            title="Fork me on Gitea"
+            >Fork me on Gitea</a
+        >
+
         <header
             class="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60"
         >
             <div
-                class="mx-auto flex h-14 max-w-7xl items-center justify-between px-4"
+                class="mx-auto grid h-14 max-w-7xl grid-cols-3 items-center px-4"
             >
-                <h1 class="text-lg font-semibold tracking-tight">Skwik</h1>
-                <div class="flex items-center gap-4">
+                <div><!-- spacer for ribbon --></div>
+                <div class="flex items-center justify-center gap-2">
+                    <SkwikLogo :size="28" />
+                    <h1
+                        class="font-mono text-lg font-semibold tracking-tight"
+                    >
+                        Skwik
+                    </h1>
+                    <span
+                        class="hidden text-[10px] font-medium uppercase tracking-widest text-muted-foreground sm:inline"
+                        >Perspective Correction</span
+                    >
+                </div>
+                <div class="flex items-center justify-end gap-4">
                     <StepIndicator />
                     <ThemeToggle />
                 </div>
@@ -32,5 +56,18 @@ const store = useAppStore()
             <DatumEditor v-else-if="store.currentStep === 3" />
             <ResultViewer v-else-if="store.currentStep === 4" />
         </main>
+
+        <footer
+            class="border-t border-border/50 py-4 text-center text-xs text-muted-foreground"
+        >
+            Made by
+            <a
+                href="https://github.com/usr-ein"
+                target="_blank"
+                rel="noopener"
+                class="underline underline-offset-2 transition-colors hover:text-foreground"
+                >Samuel Prevost</a
+            >
+        </footer>
     </div>
 </template>

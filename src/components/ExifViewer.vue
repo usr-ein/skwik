@@ -149,7 +149,9 @@ function getExifRows(): ExifRow[] {
                                 <TableCell class="font-medium">{{
                                     row.label
                                 }}</TableCell>
-                                <TableCell>{{ row.value }}</TableCell>
+                                <TableCell class="font-mono text-sm">{{
+                    row.value
+                }}</TableCell>
                             </TableRow>
                         </TableBody>
                     </Table>
@@ -179,26 +181,31 @@ function getExifRows(): ExifRow[] {
                     </svg>
                     <div class="text-sm text-muted-foreground">
                         <p class="font-medium text-foreground">
-                            Lens Correction Info
+                            Why EXIF matters
                         </p>
                         <p class="mt-1">
+                            Focal length and lens model data allow the
+                            algorithm to estimate radial distortion
+                            (barrel/pincushion) introduced by the lens.
+                            Without this, the perspective correction relies
+                            solely on the datum geometry you provide.
+                        </p>
+                        <p class="mt-2">
                             <template v-if="store.exifData.focalLength">
-                                This image was shot at
-                                <strong
-                                    >{{ store.exifData.focalLength }}mm</strong
+                                Detected
+                                <span class="font-mono font-medium text-foreground"
+                                    >{{ store.exifData.focalLength }}mm</span
                                 >
                                 <template v-if="store.exifData.lensModel">
-                                    with a
-                                    <strong>{{
+                                    on
+                                    <span class="font-medium text-foreground">{{
                                         store.exifData.lensModel
-                                    }}</strong> </template
-                                >. The deskew algorithm can use this to correct
-                                barrel/pincushion distortion.
+                                    }}</span> </template
+                                >. Lens correction will be applied.
                             </template>
                             <template v-else>
-                                No focal length data found. The algorithm will
-                                rely solely on datum measurements for
-                                perspective correction.
+                                No focal length found. Lens distortion
+                                correction will be skipped.
                             </template>
                         </p>
                     </div>

@@ -49,19 +49,23 @@ function getPointConfigs(datum: Datum, dIdx: number) {
     const color = getDatumColor(dIdx)
     const isSelected = store.selectedDatumId === datum.id
     const points = datum.type === "rectangle" ? datum.corners : datum.endpoints
-    const radius = isSelected ? 10 : 7
+    const baseRadius = isSelected ? 6 : 4
+    const visualRadius = Math.max(
+        baseRadius / scale.value,
+        baseRadius * 0.5
+    )
 
     return points.map((pt, pIdx) => ({
         x: pt.x,
         y: pt.y,
-        radius: radius / scale.value,
+        radius: visualRadius,
         fill: color,
         stroke: isSelected ? "#fff" : color,
-        strokeWidth: 2 / scale.value,
+        strokeWidth: 1.5 / scale.value,
         draggable: true,
         _datumId: datum.id,
         _pointIndex: pIdx,
-        hitStrokeWidth: 20 / scale.value,
+        hitStrokeWidth: 12 / scale.value,
     }))
 }
 

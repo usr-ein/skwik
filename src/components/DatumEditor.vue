@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref, computed } from "vue"
+import { ref, computed, watch } from "vue"
 import { useMediaQuery } from "@vueuse/core"
 import { useAppStore } from "@/stores/app"
+import { saveDatums } from "@/lib/datum-cache"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
     Tooltip,
@@ -40,6 +42,16 @@ const nextTooltip = computed(() => {
     const names = incompleteDatums.value.map((d) => d.label)
     return `Missing dimensions: ${names.join(", ")}`
 })
+
+watch(
+    () => store.datums,
+    (datums) => {
+        if (store.fileHash && datums.length > 0) {
+            saveDatums(store.fileHash, datums)
+        }
+    },
+    { deep: true },
+)
 </script>
 
 <template>
@@ -76,6 +88,16 @@ const nextTooltip = computed(() => {
                 </TooltipProvider>
             </div>
         </div>
+
+        <Transition name="fade">
+            <Badge
+                v-if="store.cacheRestoreMessage"
+                variant="secondary"
+                class="text-xs"
+            >
+                {{ store.cacheRestoreMessage }}
+            </Badge>
+        </Transition>
 
         <!-- Single layout: canvas always present, sidebar conditionally placed -->
         <div

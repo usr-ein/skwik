@@ -17,17 +17,32 @@ const steps = [
         <template v-for="(step, i) in steps" :key="step.num">
             <Badge
                 :variant="
-                    store.currentStep === step.num ? 'default' : 'outline'
+                    store.currentStep === step.num
+                        ? 'default'
+                        : 'outline'
                 "
-                class="cursor-default select-none text-xs"
+                class="select-none font-mono text-xs"
                 :class="{
                     'opacity-40': store.currentStep < step.num,
+                    'cursor-pointer hover:bg-accent':
+                        step.num <= store.maxStepReached
+                        && step.num !== store.currentStep,
+                    'cursor-default':
+                        step.num > store.maxStepReached
+                        || step.num === store.currentStep,
                 }"
+                @click="
+                    step.num <= store.maxStepReached
+                        ? store.goToStep(step.num)
+                        : undefined
+                "
             >
-                {{ step.num }}. {{ step.label }}
+                {{ step.num }}.{{ step.label }}
             </Badge>
-            <span v-if="i < steps.length - 1" class="text-muted-foreground"
-                >&middot;</span
+            <span
+                v-if="i < steps.length - 1"
+                class="text-xs text-muted-foreground/40"
+                >&rsaquo;</span
             >
         </template>
     </nav>
