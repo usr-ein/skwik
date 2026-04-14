@@ -2,9 +2,13 @@ import { defineStore } from "pinia"
 import { ref, computed } from "vue"
 import type { AppStep, Datum, DeskewResult, ExifData } from "@/types"
 import { DEFAULT_SCALE_PX_PER_MM } from "@/types"
+import { loadSettings } from "@/lib/settings-cache"
 
 export const useAppStore = defineStore("app", () => {
+    const cached = loadSettings()
+
     const currentStep = ref<AppStep>(1)
+    const maxStepReached = ref<AppStep>(1)
     const originalFile = ref<File | null>(null)
     const loadedImage = ref<HTMLImageElement | null>(null)
     const exifData = ref<ExifData>({})
@@ -13,7 +17,11 @@ export const useAppStore = defineStore("app", () => {
     const isProcessing = ref(false)
     const processingStatus = ref("")
     const selectedDatumId = ref<string | null>(null)
-    const scalePxPerMm = ref(DEFAULT_SCALE_PX_PER_MM)
+    const scalePxPerMm = ref(
+        cached?.scalePxPerMm ?? DEFAULT_SCALE_PX_PER_MM,
+    )
+    const fileHash = ref<string | null>(null)
+    const cacheRestoreMessage = ref("")
 
     const canProceedToStep2 = computed(() => loadedImage.value !== null)
     const canProceedToStep3 = computed(() => canProceedToStep2.value)
@@ -36,6 +44,9 @@ export const useAppStore = defineStore("app", () => {
 
     function goToStep(step: AppStep) {
         currentStep.value = step
+        if (step > maxStepReached.value) {
+            maxStepReached.value = step
+        }
     }
 
     function addDatum(datum: Datum) {
@@ -65,8 +76,13 @@ export const useAppStore = defineStore("app", () => {
         deskewResult.value = result
     }
 
+    function setFileHash(hash: string) {
+        fileHash.value = hash
+    }
+
     function reset() {
         currentStep.value = 1
+        maxStepReached.value = 1
         originalFile.value = null
         loadedImage.value = null
         exifData.value = {}
@@ -76,10 +92,13 @@ export const useAppStore = defineStore("app", () => {
         processingStatus.value = ""
         selectedDatumId.value = null
         scalePxPerMm.value = DEFAULT_SCALE_PX_PER_MM
+        fileHash.value = null
+        cacheRestoreMessage.value = ""
     }
 
     return {
         currentStep,
+        maxStepReached,
         originalFile,
         loadedImage,
         exifData,
@@ -89,6 +108,8 @@ export const useAppStore = defineStore("app", () => {
         processingStatus,
         selectedDatumId,
         scalePxPerMm,
+        fileHash,
+        cacheRestoreMessage,
         canProceedToStep2,
         canProceedToStep3,
         canProceedToStep4,
@@ -99,6 +120,7 @@ export const useAppStore = defineStore("app", () => {
         updateDatum,
         removeDatum,
         setResult,
+        setFileHash,
         reset,
     }
 })
