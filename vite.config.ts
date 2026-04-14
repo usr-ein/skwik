@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "node:path";
 
 export default defineConfig({
+  base: process.env.GITHUB_ACTIONS ? "/skwik/" : "/",
   plugins: [vue(), tailwindcss()],
   resolve: {
     alias: {
