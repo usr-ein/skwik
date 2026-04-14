@@ -14,10 +14,13 @@ const scale = ref(1)
 const offsetX = ref(0)
 const offsetY = ref(0)
 
-// Touch state for pinch-to-zoom
+// Touch state for pinch-to-zoom and pan
 let lastPinchDist = 0
 let isPanning = false
+let isPinching = false
 let panStart = { x: 0, y: 0 }
+// Track whether a Konva shape is being dragged (touch)
+let isDraggingShape = false
 
 const imageConfig = computed(() => {
     const img = store.loadedImage
@@ -31,6 +34,8 @@ const imageConfig = computed(() => {
     }
 })
 
+const stageDraggable = ref(true)
+
 const stageConfig = computed(() => ({
     width: stageWidth.value,
     height: stageHeight.value,
@@ -38,7 +43,7 @@ const stageConfig = computed(() => ({
     scaleY: scale.value,
     x: offsetX.value,
     y: offsetY.value,
-    draggable: false,
+    draggable: stageDraggable.value,
 }))
 
 function datumIndex(datum: Datum): number {
@@ -198,25 +203,29 @@ function getTouchCenter(t1: Touch, t2: Touch): { x: number; y: number } {
     }
 }
 
+let pendingPanTouch: { x: number; y: number } | null = null
+
 function onTouchStart(e: TouchEvent) {
     if (e.touches.length === 2) {
         e.preventDefault()
+        isPanning = false
+        isDraggingShape = false
+        isPinching = true
+        pendingPanTouch = null
+        // Disable stage drag so Konva doesn't fight with pinch-zoom
+        stageDraggable.value = false
         const t0 = e.touches[0]
         const t1 = e.touches[1]
         if (t0 && t1) {
             lastPinchDist = getTouchDistance(t0, t1)
         }
     } else if (e.touches.length === 1) {
-        // Single-finger pan (only if not on a point)
-        const target = e.target as HTMLElement
-        if (!target.closest(".konvajs-content")) return
+        // Record the touch but don't start panning yet —
+        // give Konva a chance to claim it as a shape drag.
         const t0 = e.touches[0]
         if (!t0) return
-        isPanning = true
-        panStart = {
-            x: t0.clientX - offsetX.value,
-            y: t0.clientY - offsetY.value,
-        }
+        pendingPanTouch = { x: t0.clientX, y: t0.clientY }
+        isPanning = false
     }
 }
 
@@ -249,17 +258,56 @@ function onTouchMove(e: TouchEvent) {
         offsetY.value = cy - mousePointTo.y * newScale
 
         lastPinchDist = dist
-    } else if (e.touches.length === 1 && isPanning) {
+    } else if (e.touches.length === 1 && !isDraggingShape) {
         const t0 = e.touches[0]
         if (!t0) return
-        offsetX.value = t0.clientX - panStart.x
-        offsetY.value = t0.clientY - panStart.y
+
+        // If we haven't started panning yet, promote the pending touch
+        if (!isPanning && pendingPanTouch) {
+            isPanning = true
+            panStart = {
+                x: pendingPanTouch.x - offsetX.value,
+                y: pendingPanTouch.y - offsetY.value,
+            }
+            pendingPanTouch = null
+        }
+
+        if (isPanning) {
+            offsetX.value = t0.clientX - panStart.x
+            offsetY.value = t0.clientY - panStart.y
+        }
     }
 }
 
 function onTouchEnd() {
     lastPinchDist = 0
     isPanning = false
+    isDraggingShape = false
+    pendingPanTouch = null
+    if (isPinching) {
+        isPinching = false
+        // Re-enable stage drag after pinch ends
+        stageDraggable.value = true
+    }
+}
+
+function onPointDragStart() {
+    isDraggingShape = true
+    isPanning = false
+    pendingPanTouch = null
+    stageDraggable.value = false
+}
+
+function onPointDragEnd() {
+    isDraggingShape = false
+    stageDraggable.value = true
+}
+
+function onStageDragEnd(e: { target: { x: () => number; y: () => number; nodeType: string } }) {
+    // Only sync offset when the stage itself was dragged, not a child shape
+    if (e.target.nodeType !== "Stage") return
+    offsetX.value = e.target.x()
+    offsetY.value = e.target.y()
 }
 
 // Fit image to canvas on mount
@@ -308,13 +356,14 @@ watch(() => store.loadedImage, fitToCanvas)
 <template>
     <div
         ref="containerRef"
-        class="h-full w-full touch-none overflow-hidden rounded-lg border border-border bg-muted"
+        class="h-full w-full cursor-grab overflow-hidden rounded-lg border border-border bg-muted active:cursor-grabbing"
+        style="touch-action: none"
         @wheel.prevent="onWheel"
         @touchstart="onTouchStart"
         @touchmove="onTouchMove"
         @touchend="onTouchEnd"
     >
-        <v-stage :config="stageConfig">
+        <v-stage :config="stageConfig" @dragend="onStageDragEnd">
             <v-layer>
                 <!-- Background image -->
                 <v-image v-if="imageConfig" :config="imageConfig" />
@@ -344,7 +393,9 @@ watch(() => store.loadedImage, fitToCanvas)
                         )"
                         :key="`${datum.id}-pt-${ptCfg._pointIndex}`"
                         :config="ptCfg"
+                        @dragstart="onPointDragStart"
                         @dragmove="onPointDragMove"
+                        @dragend="onPointDragEnd"
                         @click="onPointClick(datum.id)"
                         @tap="onPointClick(datum.id)"
                     />
