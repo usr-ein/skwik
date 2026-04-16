@@ -59,6 +59,22 @@ pnpm type-check # vue-tsc
 
 Rectangles: A3, A4, A5, A6, 15x10 cm. Custom dimensions supported. Lines: any length.
 
+## How Skwik compares
+
+There are plenty of tools that do *part* of what Skwik does, but none that combine everything:
+
+| Tool | Client-side | Multi-datum weighting | Real-world mm scale | Measurement tools | Scale bar export |
+|---|:---:|:---:|:---:|:---:|:---:|
+| [**Skwik**](https://serv.e1n.sh/git/sam1902/skwik) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [MYOG Perspective Correction](https://www.myogtutorials.com/free-online-image-perspective-correction-tool/) | ✅ | ❌ | ✅ | ❌ | ❌ |
+| [PerspectiveFix](https://oathanrex.github.io/perspective-fix/) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| [PicFix.pro](https://picfix.pro/) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| [ImageOnline Perspective](https://imageonline.io/perspective-tool/) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| [Toolschimp Image Measure](https://www.toolschimp.com/image-measure) | ✅ | ❌ | ✅ | ✅ | ❌ |
+| [Aspose Deskew](https://products.aspose.app/imaging/image-deskew) | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+Most deskew tools just pull 4 corners to a rectangle without any real-world dimensions -- the output has no scale. Most measurement tools calibrate against a single reference and don't correct perspective. Skwik uses multiple weighted datums (rectangles + lines, each with a confidence score) to solve both problems in one pass, and lets you measure distances or export with a scale bar on the corrected image.
+
 ## License
 
 MIT
