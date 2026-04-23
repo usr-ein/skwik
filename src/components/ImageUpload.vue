@@ -21,7 +21,7 @@ const error = ref("")
 const fileInput = ref<HTMLInputElement | null>(null)
 const cacheCount = ref(0)
 
-const ACCEPTED = ".jpg,.jpeg,.heic,.heif"
+const ACCEPTED = "image/*,.heic,.heif"
 
 onMounted(() => {
     cacheCount.value = getCacheSize()
@@ -94,8 +94,8 @@ function onFileSelect(e: Event) {
                 <CardHeader class="text-center">
                     <CardTitle class="text-lg">Load Source Image</CardTitle>
                     <CardDescription>
-                        Drop a JPG or HEIC file, or click to browse. HEIC
-                        is converted automatically.
+                        Drop any image (JPG, PNG, WebP, HEIC, …), or click
+                        to browse. HEIC is converted automatically.
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -147,7 +147,7 @@ function onFileSelect(e: Event) {
                         <p
                             class="mt-1 font-mono text-xs text-muted-foreground/60"
                         >
-                            .jpg .jpeg .heic .heif
+                            .jpg .jpeg .png .webp .gif .heic .heif
                         </p>
                     </template>
 

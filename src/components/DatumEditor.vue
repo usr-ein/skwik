@@ -3,6 +3,7 @@ import { ref, computed, watch } from "vue"
 import { useMediaQuery } from "@vueuse/core"
 import { useAppStore } from "@/stores/app"
 import { saveDatums } from "@/lib/datum-cache"
+import { isRectCrossed } from "@/lib/datums"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -36,12 +37,33 @@ const incompleteDatums = computed(() =>
     }),
 )
 
+const crossedRects = computed(() =>
+    store.datums.filter(
+        (d) => d.type === "rectangle" && isRectCrossed(d),
+    ),
+)
+
+const canGoNext = computed(
+    () => store.canProceedToStep4 && crossedRects.value.length === 0,
+)
+
 const nextTooltip = computed(() => {
     if (store.datums.length === 0) return "Add at least one datum"
-    if (incompleteDatums.value.length === 0) return ""
-    const names = incompleteDatums.value.map((d) => d.label)
-    return `Missing dimensions: ${names.join(", ")}`
+    if (incompleteDatums.value.length > 0) {
+        const names = incompleteDatums.value.map((d) => d.label)
+        return `Missing dimensions: ${names.join(", ")}`
+    }
+    if (crossedRects.value.length > 0) {
+        const names = crossedRects.value.map((d) => d.label)
+        return `Crossed corners — fix corner order on: ${names.join(", ")}`
+    }
+    return ""
 })
+
+function handleNext() {
+    if (!canGoNext.value) return
+    store.goToStep(4)
+}
 
 watch(
     () => store.datums,
@@ -74,8 +96,8 @@ watch(
                             <span class="inline-flex">
                                 <Button
                                     size="sm"
-                                    :disabled="!store.canProceedToStep4"
-                                    @click="store.goToStep(4)"
+                                    :disabled="!canGoNext"
+                                    @click="handleNext"
                                 >
                                     Next
                                 </Button>

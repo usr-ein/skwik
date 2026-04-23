@@ -48,6 +48,17 @@ export function createRectDatum(
     }
 }
 
+/**
+ * Rectangle corners are stored as [TL, TR, BR, BL]. A rectangle is
+ * "crossed" when a user has dragged corners past each other so the ordering
+ * no longer holds: top corners must sit above bottom corners (smaller y in
+ * image coordinates), and right corners must sit right of left corners.
+ */
+export function isRectCrossed(rect: RectDatum): boolean {
+    const [tl, tr, br, bl] = rect.corners
+    return tl.y >= bl.y || tr.y >= br.y || tl.x >= tr.x || bl.x >= br.x
+}
+
 export function createLineDatum(center: Point, index: number): LineDatum {
     const spread = 100
     return {

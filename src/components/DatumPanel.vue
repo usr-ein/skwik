@@ -46,6 +46,13 @@ function updateField(datum: Datum, field: string, value: string | number) {
     store.updateDatum(datum.id, { [field]: value })
 }
 
+function swapRectDims(datum: RectDatum) {
+    store.updateDatum(datum.id, {
+        widthMm: datum.heightMm,
+        heightMm: datum.widthMm,
+    })
+}
+
 function updateConfidence(datum: Datum, val: number[] | undefined) {
     if (!val) return
     const v = val[0]
@@ -191,7 +198,7 @@ function formatDimensions(datum: Datum): string {
                     <!-- Dimensions -->
                     <div
                         v-if="datum.type === 'rectangle'"
-                        class="grid grid-cols-2 gap-2"
+                        class="grid grid-cols-[1fr_auto_1fr] items-end gap-2"
                     >
                         <div>
                             <Label class="text-xs">Width (mm)</Label>
@@ -209,6 +216,31 @@ function formatDimensions(datum: Datum): string {
                                 @click.stop
                             />
                         </div>
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            class="h-8 w-8 shrink-0 text-muted-foreground"
+                            title="Swap width and height"
+                            aria-label="Swap width and height"
+                            @click.stop="swapRectDims(datum as RectDatum)"
+                        >
+                            <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            >
+                                <polyline points="17 1 21 5 17 9" />
+                                <path d="M3 11V9a2 2 0 0 1 2-2h16" />
+                                <polyline points="7 23 3 19 7 15" />
+                                <path d="M21 13v2a2 2 0 0 1-2 2H3" />
+                            </svg>
+                        </Button>
                         <div>
                             <Label class="text-xs">Height (mm)</Label>
                             <Input
