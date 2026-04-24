@@ -63,13 +63,24 @@ const MAX_AUTO_SCALE_DIM = 8192
  *  best datum by type priority (rect > line > ellipse) and then confidence.
  *  Returns null if no datum gives a usable scale. */
 function pickScaleRef(): { srcPxPerMm: number } | null {
-    const best = [...store.datums].sort((a, b) => {
-        const rank = (d: Datum) =>
-            d.type === "rectangle" ? 0 : d.type === "ellipse" ? 1 : 2
-        const r = rank(a) - rank(b)
-        if (r !== 0) return r
-        return b.confidence - a.confidence
-    })[0]
+    const axisFlagged = store.datums.find(
+        (d) =>
+            (d.type === "rectangle" && d.isAxisReference) ||
+            (d.type === "line" && d.axisRole),
+    )
+    const best =
+        axisFlagged ??
+        [...store.datums].sort((a, b) => {
+            const rank = (d: Datum) =>
+                d.type === "rectangle"
+                    ? 0
+                    : d.type === "ellipse"
+                      ? 1
+                      : 2
+            const r = rank(a) - rank(b)
+            if (r !== 0) return r
+            return b.confidence - a.confidence
+        })[0]
     if (!best) return null
     if (best.type === "rectangle") {
         if (best.widthMm <= 0 || best.heightMm <= 0) return null
@@ -120,7 +131,8 @@ function computeAutoScale(): number {
         autoScale *= MAX_AUTO_SCALE_DIM / estMax
     }
 
-    return Math.max(1, Math.round(autoScale * 10) / 10)
+    // The scale input is integer-only; floor so the shown value round-trips.
+    return Math.max(1, Math.floor(autoScale))
 }
 
 onMounted(() => {
@@ -383,6 +395,7 @@ async function download() {
                         :model-value="scaleInput"
                         type="number"
                         min="1"
+                        step="1"
                         class="w-28 font-mono"
                         :class="
                             scaleValid

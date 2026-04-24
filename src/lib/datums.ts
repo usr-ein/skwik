@@ -89,15 +89,26 @@ export function createLineDatum(center: Point, index: number): LineDatum {
     }
 }
 
+const DEFAULT_ELLIPSE_POINT_COUNT = 8
+
 export function createEllipseDatum(
     center: Point,
     index: number,
     preset?: CirclePreset,
 ): EllipseDatum {
     const spread = 80
+    const points: Point[] = []
+    for (let i = 0; i < DEFAULT_ELLIPSE_POINT_COUNT; i++) {
+        const t = (2 * Math.PI * i) / DEFAULT_ELLIPSE_POINT_COUNT
+        points.push({
+            x: center.x + spread * Math.cos(t),
+            y: center.y + spread * Math.sin(t),
+        })
+    }
     return {
         id: nanoid(),
         type: "ellipse",
+        points,
         center: { x: center.x, y: center.y },
         axisEndA: { x: center.x + spread, y: center.y },
         axisEndB: { x: center.x, y: center.y + spread },

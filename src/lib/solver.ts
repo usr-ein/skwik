@@ -237,6 +237,17 @@ type Primary =
 
 function pickPrimary(datums: Datum[]): Primary {
     if (datums.length === 0) throw new Error("No datums provided.")
+
+    // User-flagged world-axis reference wins regardless of type priority.
+    for (const d of datums) {
+        if (d.type === "rectangle" && d.isAxisReference) {
+            return { kind: "rect", datum: d }
+        }
+        if (d.type === "line" && d.axisRole) {
+            return { kind: "line", datum: d }
+        }
+    }
+
     const typeRank = (d: Datum): number =>
         d.type === "rectangle" ? 0 : d.type === "ellipse" ? 1 : 2
     const sizeKey = (d: Datum): number => {
@@ -314,12 +325,23 @@ function primaryLineCorrespondences(
     const p2: Point = { x: p0.x - dy, y: p0.y + dx }
     const p3: Point = { x: p1.x - dy, y: p1.y + dx }
     const srcPts: [Point, Point, Point, Point] = [p0, p1, p2, p3]
-    const targets: [Point, Point, Point, Point] = [
-        { x: 0, y: 0 },
-        { x: L, y: 0 },
-        { x: 0, y: L },
-        { x: L, y: L },
-    ]
+
+    // Default: line defines world +x. With axisRole === "y", endpoints land
+    // along world +y and the synthetic perpendicular lands along +x.
+    const targets: [Point, Point, Point, Point] =
+        line.axisRole === "y"
+            ? [
+                  { x: 0, y: 0 },
+                  { x: 0, y: L },
+                  { x: L, y: 0 },
+                  { x: L, y: L },
+              ]
+            : [
+                  { x: 0, y: 0 },
+                  { x: L, y: 0 },
+                  { x: 0, y: L },
+                  { x: L, y: L },
+              ]
     const weight = Math.max(
         1,
         Math.round(line.confidence * PRIMARY_GAUGE_BOOST),

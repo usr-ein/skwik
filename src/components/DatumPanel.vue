@@ -91,6 +91,13 @@ function typeBadge(datum: Datum): string {
     if (datum.type === "line") return "Line"
     return "Circle"
 }
+
+function axisBadge(datum: Datum): string | null {
+    if (datum.type === "rectangle" && datum.isAxisReference) return "axis"
+    if (datum.type === "line" && datum.axisRole === "x") return "+x"
+    if (datum.type === "line" && datum.axisRole === "y") return "+y"
+    return null
+}
 </script>
 
 <template>
@@ -190,6 +197,13 @@ function typeBadge(datum: Datum): string {
                             />
                             <Badge variant="outline" class="text-xs">
                                 {{ typeBadge(datum) }}
+                            </Badge>
+                            <Badge
+                                v-if="axisBadge(datum)"
+                                variant="default"
+                                class="text-xs"
+                            >
+                                {{ axisBadge(datum) }}
                             </Badge>
                             <span class="text-xs text-muted-foreground">{{
                                 formatDimensions(datum)
@@ -330,6 +344,68 @@ function typeBadge(datum: Datum): string {
                             "
                             @click.stop
                         />
+                    </div>
+
+                    <!-- World-axis role -->
+                    <div
+                        v-if="datum.type === 'rectangle'"
+                        class="flex items-center justify-between"
+                    >
+                        <Label class="text-xs">World axis reference</Label>
+                        <label
+                            class="flex cursor-pointer items-center gap-1.5"
+                            @click.stop
+                        >
+                            <input
+                                type="checkbox"
+                                class="accent-primary"
+                                :checked="datum.isAxisReference ?? false"
+                                @change="
+                                    (e) =>
+                                        store.setAxisRole(
+                                            datum.id,
+                                            (e.target as HTMLInputElement)
+                                                .checked
+                                                ? 'rect'
+                                                : null,
+                                        )
+                                "
+                            />
+                            <span class="text-xs text-muted-foreground"
+                                >Use</span
+                            >
+                        </label>
+                    </div>
+                    <div v-else-if="datum.type === 'line'">
+                        <Label class="text-xs">World axis</Label>
+                        <div class="mt-1 grid grid-cols-3 gap-1">
+                            <button
+                                v-for="opt in [
+                                    { value: null, label: 'None' },
+                                    { value: 'x', label: 'X' },
+                                    { value: 'y', label: 'Y' },
+                                ]"
+                                :key="String(opt.value)"
+                                type="button"
+                                class="h-7 rounded-md border text-xs font-medium transition-colors"
+                                :class="
+                                    (datum.axisRole ?? null) === opt.value
+                                        ? 'border-primary bg-primary/10 text-primary'
+                                        : 'border-border text-muted-foreground hover:bg-accent'
+                                "
+                                @click.stop="
+                                    store.setAxisRole(
+                                        datum.id,
+                                        opt.value as
+                                            | 'x'
+                                            | 'y'
+                                            | null,
+                                    )
+                                "
+                            >
+                                {{ opt.label }}
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Confidence -->

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue"
+import { nanoid } from "nanoid"
 import type { Point } from "@/types"
+import { getDatumColor } from "@/lib/datums"
 
 const props = defineProps<{
     imageUrl: string
@@ -20,27 +22,72 @@ const viewOffsetX = ref(0)
 const viewOffsetY = ref(0)
 
 // Tool state
-const activeTool = ref<"none" | "measure">("none")
+type ToolMode = "none" | "line" | "ellipse" | "angle"
+const activeTool = ref<ToolMode>("none")
 const showGrid = ref(false)
 const gridSpacingMm = ref(10)
 
-// Measurement state
-const measurePoints = ref<Point[]>([])
-const measureHistory = ref<{ a: Point; b: Point; distMm: number }[]>([])
+// Measurement types. Geometry lives in image space so it is invariant under
+// pan/zoom and survives redraws without reprojection.
+interface BaseMeasurement {
+    id: string
+    colorIndex: number
+}
+interface LineMeasurement extends BaseMeasurement {
+    type: "line"
+    a: Point
+    b: Point
+}
+interface EllipseMeasurement extends BaseMeasurement {
+    type: "ellipse"
+    center: Point
+    axisEndA: Point
+    axisEndB: Point
+}
+interface AngleMeasurement extends BaseMeasurement {
+    type: "angle"
+    vertex: Point
+    armA: Point
+    armB: Point
+}
+type Measurement = LineMeasurement | EllipseMeasurement | AngleMeasurement
+
+const measurements = ref<Measurement[]>([])
+const selectedId = ref<string | null>(null)
+// Monotonically increasing counter so deleting a measurement doesn't recolor
+// the remaining ones. Each new measurement claims the next palette slot.
+let colorCounter = 0
+
+// In-progress placement points (image space) while a placement tool is active.
+const placementPoints = ref<Point[]>([])
+// Cursor position in image space for the live preview of an in-progress
+// placement. Null when the pointer is off-canvas.
+const placementCursor = ref<Point | null>(null)
 
 // Touch/pan state
 let isPanning = false
 let panStart = { x: 0, y: 0 }
 let lastPinchDist = 0
 
-const measureDistMm = computed(() => {
-    if (measurePoints.value.length < 2) return null
-    const [a, b] = measurePoints.value as [Point, Point]
-    const dxPx = b.x - a.x
-    const dyPx = b.y - a.y
-    const distPx = Math.hypot(dxPx, dyPx)
-    return distPx / props.scalePxPerMm
-})
+// Drag state for moving/reshaping committed measurements.
+type DragMode = "none" | "move" | "handle"
+interface DragState {
+    mode: DragMode
+    measurementId: string
+    // For "handle" drag: which handle of the measurement we grabbed.
+    handleKey: string | null
+    // Image-space coord where the drag started (cursor position).
+    startImg: Point
+    // Snapshot of the measurement at drag start, for delta-based updates.
+    startSnapshot: Measurement
+    // Did this pointer down actually move? Used to distinguish click vs drag.
+    moved: boolean
+}
+let dragState: DragState | null = null
+// Pixel threshold in screen space before a press becomes a drag. Small enough
+// that intentional drags feel responsive; large enough that a shaky click
+// still registers as a click.
+const DRAG_THRESHOLD_PX = 3
 
 function loadImg() {
     const image = new Image()
@@ -106,25 +153,23 @@ function drawOverlay() {
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.save()
 
-    // Grid
     if (showGrid.value) {
         drawGrid(ctx, image)
     }
 
-    // Measurement history
-    for (const m of measureHistory.value) {
-        drawMeasureLine(ctx, m.a, m.b, m.distMm, "rgba(100,180,255,0.5)")
+    // Draw unselected first (faint) so the selected measurement always sits
+    // on top with full opacity and its handles aren't occluded.
+    for (const m of measurements.value) {
+        if (m.id === selectedId.value) continue
+        drawMeasurement(ctx, m, false)
     }
+    const selected = measurements.value.find((m) => m.id === selectedId.value)
+    if (selected) drawMeasurement(ctx, selected, true)
 
-    // Active measurement
-    if (measurePoints.value.length >= 2) {
-        const [a, b] = measurePoints.value as [Point, Point]
-        drawMeasureLine(ctx, a, b, measureDistMm.value ?? 0, "#3b82f6")
-    }
-
-    // Measurement points
-    for (const pt of measurePoints.value) {
-        drawPoint(ctx, pt, "#3b82f6")
+    // Placement preview overlaying everything, in the active tool's color
+    // slot (= next palette slot the new measurement will claim).
+    if (activeTool.value !== "none" && placementPoints.value.length > 0) {
+        drawPlacementPreview(ctx)
     }
 
     ctx.restore()
@@ -147,14 +192,12 @@ function drawGrid(
     ctx.strokeStyle = "rgba(255, 255, 255, 0.15)"
     ctx.lineWidth = 1 / viewScale.value
 
-    // Vertical lines
     for (let x = 0; x <= w; x += spacingPx) {
         ctx.beginPath()
         ctx.moveTo(x, 0)
         ctx.lineTo(x, h)
         ctx.stroke()
     }
-    // Horizontal lines
     for (let y = 0; y <= h; y += spacingPx) {
         ctx.beginPath()
         ctx.moveTo(0, y)
@@ -162,7 +205,6 @@ function drawGrid(
         ctx.stroke()
     }
 
-    // Major lines every 5 intervals
     ctx.strokeStyle = "rgba(255, 255, 255, 0.35)"
     ctx.lineWidth = 1.5 / viewScale.value
     const major = spacingPx * 5
@@ -179,7 +221,6 @@ function drawGrid(
         ctx.stroke()
     }
 
-    // Labels on major lines
     ctx.fillStyle = "rgba(255, 255, 255, 0.6)"
     const fontSize = Math.max(10, 12 / viewScale.value)
     ctx.font = `${String(fontSize)}px monospace`
@@ -202,69 +243,434 @@ function imgToScreen(pt: Point): Point {
     }
 }
 
-function drawMeasureLine(
-    ctx: CanvasRenderingContext2D,
-    a: Point,
-    b: Point,
-    distMm: number,
-    color: string,
-) {
-    const sa = imgToScreen(a)
-    const sb = imgToScreen(b)
-
-    ctx.beginPath()
-    ctx.moveTo(sa.x, sa.y)
-    ctx.lineTo(sb.x, sb.y)
-    ctx.strokeStyle = color
-    ctx.lineWidth = 2
-    ctx.setLineDash([6, 3])
-    ctx.stroke()
-    ctx.setLineDash([])
-
-    // Label
-    const mx = (sa.x + sb.x) / 2
-    const my = (sa.y + sb.y) / 2
-    const label = distMm >= 10
-        ? `${distMm.toFixed(1)} mm`
-        : `${distMm.toFixed(2)} mm`
-
-    ctx.font = "bold 13px monospace"
-    const metrics = ctx.measureText(label)
-    const pad = 4
-    const tw = metrics.width + pad * 2
-    const th = 18
-
-    ctx.fillStyle = "rgba(0, 0, 0, 0.75)"
-    ctx.fillRect(mx - tw / 2, my - th / 2 - 10, tw, th)
-    ctx.fillStyle = "#fff"
-    ctx.textAlign = "center"
-    ctx.textBaseline = "middle"
-    ctx.fillText(label, mx, my - 10)
-    ctx.textAlign = "start"
-    ctx.textBaseline = "alphabetic"
-}
-
-function drawPoint(
-    ctx: CanvasRenderingContext2D,
-    pt: Point,
-    color: string,
-) {
-    const s = imgToScreen(pt)
-    ctx.beginPath()
-    ctx.arc(s.x, s.y, 5, 0, Math.PI * 2)
-    ctx.fillStyle = color
-    ctx.fill()
-    ctx.strokeStyle = "#fff"
-    ctx.lineWidth = 1.5
-    ctx.stroke()
-}
-
-// Convert screen coords to image coords
 function screenToImg(sx: number, sy: number): Point {
     return {
         x: (sx - viewOffsetX.value) / viewScale.value,
         y: (sy - viewOffsetY.value) / viewScale.value,
     }
+}
+
+// Per-measurement dimensions, all in millimetres.
+function lineLengthMm(m: LineMeasurement): number {
+    const dx = m.b.x - m.a.x
+    const dy = m.b.y - m.a.y
+    return Math.hypot(dx, dy) / props.scalePxPerMm
+}
+
+function ellipseAxesMm(m: EllipseMeasurement): { semiMajor: number; semiMinor: number } {
+    // Using |vA| and |vB| as semi-axes directly. This assumes the user drew
+    // roughly perpendicular conjugate axes, which is the common case on a
+    // deskewed image. A full Q = (M M^T)^{-1} eigendecomposition would be
+    // more accurate for skewed inputs but is overkill here.
+    const lenA = Math.hypot(m.axisEndA.x - m.center.x, m.axisEndA.y - m.center.y) / props.scalePxPerMm
+    const lenB = Math.hypot(m.axisEndB.x - m.center.x, m.axisEndB.y - m.center.y) / props.scalePxPerMm
+    return {
+        semiMajor: Math.max(lenA, lenB),
+        semiMinor: Math.min(lenA, lenB),
+    }
+}
+
+function angleDegrees(m: AngleMeasurement): number {
+    const ax = m.armA.x - m.vertex.x
+    const ay = m.armA.y - m.vertex.y
+    const bx = m.armB.x - m.vertex.x
+    const by = m.armB.y - m.vertex.y
+    const dot = ax * bx + ay * by
+    const cross = ax * by - ay * bx
+    // atan2 gives signed angle; we report the unsigned magnitude because
+    // "angle between two rays" is orientation-agnostic.
+    const rad = Math.atan2(Math.abs(cross), dot)
+    return (rad * 180) / Math.PI
+}
+
+function formatMm(v: number): string {
+    return v >= 10 ? v.toFixed(1) : v.toFixed(2)
+}
+
+function formatArea(v: number): string {
+    if (v >= 1000) return v.toFixed(0)
+    if (v >= 100) return v.toFixed(1)
+    return v.toFixed(2)
+}
+
+function measurementLabel(m: Measurement): string {
+    if (m.type === "line") {
+        return `${formatMm(lineLengthMm(m))} mm`
+    }
+    if (m.type === "ellipse") {
+        const { semiMajor, semiMinor } = ellipseAxesMm(m)
+        const area = Math.PI * semiMajor * semiMinor
+        return `${formatMm(semiMajor)}×${formatMm(semiMinor)} mm · ${formatArea(area)} mm²`
+    }
+    return `${angleDegrees(m).toFixed(1)}°`
+}
+
+function measurementTypeLabel(m: Measurement): string {
+    if (m.type === "line") return "Line"
+    if (m.type === "ellipse") return "Ellipse"
+    return "Angle"
+}
+
+// Anchor point in image space where we place the label/delete button. Chosen
+// per type so the label sits in a predictable, non-occluding position.
+function labelAnchor(m: Measurement): Point {
+    if (m.type === "line") {
+        return { x: (m.a.x + m.b.x) / 2, y: (m.a.y + m.b.y) / 2 }
+    }
+    if (m.type === "ellipse") {
+        return m.center
+    }
+    return m.vertex
+}
+
+// Label rectangle in screen space. Width depends on text so we measure with
+// the same ctx we are about to render with. Height is fixed for uniformity.
+function labelRect(
+    ctx: CanvasRenderingContext2D,
+    m: Measurement,
+): { x: number; y: number; w: number; h: number; textX: number; textY: number } {
+    const anchor = imgToScreen(labelAnchor(m))
+    const text = measurementLabel(m)
+    ctx.save()
+    ctx.font = "bold 13px monospace"
+    const tw = ctx.measureText(text).width
+    ctx.restore()
+    const pad = 6
+    const h = 20
+    const w = tw + pad * 2
+    // Offset the label above the anchor so it doesn't sit on top of a handle.
+    const offsetY = m.type === "angle" ? 22 : 14
+    const x = anchor.x - w / 2
+    const y = anchor.y - h / 2 - offsetY
+    return { x, y, w, h, textX: anchor.x, textY: anchor.y - offsetY }
+}
+
+// Delete button sits immediately to the right of the label. Same screen-space
+// rect is used for hit testing and for drawing.
+function deleteButtonRect(
+    ctx: CanvasRenderingContext2D,
+    m: Measurement,
+): { x: number; y: number; size: number } {
+    const rect = labelRect(ctx, m)
+    const size = 18
+    return {
+        x: rect.x + rect.w + 4,
+        y: rect.y + (rect.h - size) / 2,
+        size,
+    }
+}
+
+function drawMeasurement(
+    ctx: CanvasRenderingContext2D,
+    m: Measurement,
+    isSelected: boolean,
+) {
+    const baseColor = getDatumColor(m.colorIndex)
+    const color = isSelected ? "#ffffff" : baseColor
+    const lineAlpha = isSelected ? 1.0 : 0.8
+    const lineWidth = isSelected ? 3 : 2
+
+    ctx.save()
+    ctx.globalAlpha = lineAlpha
+
+    if (m.type === "line") {
+        drawLineGeometry(ctx, m, color, lineWidth, isSelected)
+    } else if (m.type === "ellipse") {
+        drawEllipseGeometry(ctx, m, color, lineWidth, isSelected)
+    } else {
+        drawAngleGeometry(ctx, m, color, lineWidth, isSelected)
+    }
+
+    ctx.globalAlpha = 1.0
+    drawLabel(ctx, m, baseColor, isSelected)
+    ctx.restore()
+}
+
+function drawLineGeometry(
+    ctx: CanvasRenderingContext2D,
+    m: LineMeasurement,
+    color: string,
+    lineWidth: number,
+    isSelected: boolean,
+) {
+    const sa = imgToScreen(m.a)
+    const sb = imgToScreen(m.b)
+    ctx.beginPath()
+    ctx.moveTo(sa.x, sa.y)
+    ctx.lineTo(sb.x, sb.y)
+    ctx.strokeStyle = color
+    ctx.lineWidth = lineWidth
+    ctx.setLineDash(isSelected ? [] : [6, 3])
+    ctx.stroke()
+    ctx.setLineDash([])
+    drawHandle(ctx, sa, color, isSelected)
+    drawHandle(ctx, sb, color, isSelected)
+}
+
+function drawEllipseGeometry(
+    ctx: CanvasRenderingContext2D,
+    m: EllipseMeasurement,
+    color: string,
+    lineWidth: number,
+    isSelected: boolean,
+) {
+    // Parametric draw using the two conjugate axis vectors; handles the
+    // general (non-perpendicular) case the datum editor also uses.
+    const c = imgToScreen(m.center)
+    const a = imgToScreen(m.axisEndA)
+    const b = imgToScreen(m.axisEndB)
+    const vAx = a.x - c.x
+    const vAy = a.y - c.y
+    const vBx = b.x - c.x
+    const vBy = b.y - c.y
+
+    ctx.beginPath()
+    const N = 72
+    for (let i = 0; i <= N; i++) {
+        const t = (2 * Math.PI * i) / N
+        const cs = Math.cos(t)
+        const sn = Math.sin(t)
+        const x = c.x + vAx * cs + vBx * sn
+        const y = c.y + vAy * cs + vBy * sn
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+    }
+    ctx.strokeStyle = color
+    ctx.lineWidth = lineWidth
+    ctx.setLineDash(isSelected ? [] : [6, 3])
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    // Axis guides
+    ctx.save()
+    ctx.globalAlpha *= 0.5
+    ctx.beginPath()
+    ctx.moveTo(c.x, c.y)
+    ctx.lineTo(a.x, a.y)
+    ctx.moveTo(c.x, c.y)
+    ctx.lineTo(b.x, b.y)
+    ctx.strokeStyle = color
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.restore()
+
+    drawHandle(ctx, c, color, isSelected, true)
+    drawHandle(ctx, a, color, isSelected)
+    drawHandle(ctx, b, color, isSelected)
+}
+
+function drawAngleGeometry(
+    ctx: CanvasRenderingContext2D,
+    m: AngleMeasurement,
+    color: string,
+    lineWidth: number,
+    isSelected: boolean,
+) {
+    const v = imgToScreen(m.vertex)
+    const a = imgToScreen(m.armA)
+    const b = imgToScreen(m.armB)
+
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.lineTo(v.x, v.y)
+    ctx.lineTo(b.x, b.y)
+    ctx.strokeStyle = color
+    ctx.lineWidth = lineWidth
+    ctx.setLineDash(isSelected ? [] : [6, 3])
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    // Arc sweep between the two arms to make the angle visually obvious.
+    const lenA = Math.hypot(a.x - v.x, a.y - v.y)
+    const lenB = Math.hypot(b.x - v.x, b.y - v.y)
+    const arcR = Math.max(16, Math.min(lenA, lenB) * 0.3)
+    if (lenA > 2 && lenB > 2) {
+        const thetaA = Math.atan2(a.y - v.y, a.x - v.x)
+        const thetaB = Math.atan2(b.y - v.y, b.x - v.x)
+        // Always sweep the short way around so the arc visualises the angle
+        // the number reports (0–180°).
+        let delta = thetaB - thetaA
+        while (delta > Math.PI) delta -= 2 * Math.PI
+        while (delta < -Math.PI) delta += 2 * Math.PI
+        ctx.save()
+        ctx.globalAlpha *= 0.6
+        ctx.beginPath()
+        ctx.arc(v.x, v.y, arcR, thetaA, thetaA + delta, delta < 0)
+        ctx.strokeStyle = color
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+        ctx.restore()
+    }
+
+    drawHandle(ctx, v, color, isSelected, true)
+    drawHandle(ctx, a, color, isSelected)
+    drawHandle(ctx, b, color, isSelected)
+}
+
+function drawHandle(
+    ctx: CanvasRenderingContext2D,
+    s: Point,
+    color: string,
+    isSelected: boolean,
+    primary = false,
+) {
+    const r = primary ? 6 : 5
+    ctx.beginPath()
+    ctx.arc(s.x, s.y, r, 0, Math.PI * 2)
+    ctx.fillStyle = color
+    ctx.fill()
+    ctx.strokeStyle = isSelected ? "#0b0b0b" : "#ffffff"
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+}
+
+function drawLabel(
+    ctx: CanvasRenderingContext2D,
+    m: Measurement,
+    baseColor: string,
+    isSelected: boolean,
+) {
+    const rect = labelRect(ctx, m)
+    const labelAlpha = isSelected ? 1.0 : 0.5
+    ctx.save()
+    ctx.globalAlpha = labelAlpha
+    ctx.fillStyle = isSelected ? baseColor : "rgba(0, 0, 0, 0.75)"
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 4)
+    ctx.fill()
+    if (isSelected) {
+        ctx.strokeStyle = "#ffffff"
+        ctx.lineWidth = 1
+        ctx.stroke()
+    }
+    ctx.font = "bold 13px monospace"
+    ctx.fillStyle = "#ffffff"
+    ctx.textAlign = "center"
+    ctx.textBaseline = "middle"
+    ctx.fillText(measurementLabel(m), rect.textX, rect.textY)
+    ctx.textAlign = "start"
+    ctx.textBaseline = "alphabetic"
+    ctx.restore()
+
+    if (isSelected) {
+        const btn = deleteButtonRect(ctx, m)
+        ctx.save()
+        ctx.fillStyle = "#ef4444"
+        roundRect(ctx, btn.x, btn.y, btn.size, btn.size, 4)
+        ctx.fill()
+        ctx.strokeStyle = "#ffffff"
+        ctx.lineWidth = 1
+        ctx.stroke()
+        ctx.strokeStyle = "#ffffff"
+        ctx.lineWidth = 1.75
+        ctx.beginPath()
+        const pad = 5
+        ctx.moveTo(btn.x + pad, btn.y + pad)
+        ctx.lineTo(btn.x + btn.size - pad, btn.y + btn.size - pad)
+        ctx.moveTo(btn.x + btn.size - pad, btn.y + pad)
+        ctx.lineTo(btn.x + pad, btn.y + btn.size - pad)
+        ctx.stroke()
+        ctx.restore()
+    }
+}
+
+function roundRect(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    r: number,
+) {
+    const rr = Math.min(r, w / 2, h / 2)
+    ctx.beginPath()
+    ctx.moveTo(x + rr, y)
+    ctx.lineTo(x + w - rr, y)
+    ctx.arcTo(x + w, y, x + w, y + rr, rr)
+    ctx.lineTo(x + w, y + h - rr)
+    ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr)
+    ctx.lineTo(x + rr, y + h)
+    ctx.arcTo(x, y + h, x, y + h - rr, rr)
+    ctx.lineTo(x, y + rr)
+    ctx.arcTo(x, y, x + rr, y, rr)
+    ctx.closePath()
+}
+
+function drawPlacementPreview(ctx: CanvasRenderingContext2D) {
+    const color = getDatumColor(colorCounter)
+    const pts = placementPoints.value
+    const cursor = placementCursor.value
+
+    ctx.save()
+    ctx.globalAlpha = 0.9
+    ctx.strokeStyle = color
+    ctx.fillStyle = color
+    ctx.lineWidth = 2
+    ctx.setLineDash([4, 3])
+
+    const sPts = pts.map(imgToScreen)
+    const sCursor = cursor ? imgToScreen(cursor) : null
+
+    if (activeTool.value === "line" && sPts.length >= 1 && sPts[0] && sCursor) {
+        ctx.beginPath()
+        ctx.moveTo(sPts[0].x, sPts[0].y)
+        ctx.lineTo(sCursor.x, sCursor.y)
+        ctx.stroke()
+    } else if (activeTool.value === "ellipse" && sPts.length >= 1 && sPts[0]) {
+        const center = sPts[0]
+        const endA = sPts[1] ?? sCursor
+        if (endA) {
+            ctx.beginPath()
+            ctx.moveTo(center.x, center.y)
+            ctx.lineTo(endA.x, endA.y)
+            ctx.stroke()
+        }
+        if (sPts.length >= 2 && sPts[1] && sCursor) {
+            const a = sPts[1]
+            const b = sCursor
+            ctx.beginPath()
+            ctx.moveTo(center.x, center.y)
+            ctx.lineTo(b.x, b.y)
+            ctx.stroke()
+            const vAx = a.x - center.x
+            const vAy = a.y - center.y
+            const vBx = b.x - center.x
+            const vBy = b.y - center.y
+            ctx.beginPath()
+            const N = 72
+            for (let i = 0; i <= N; i++) {
+                const t = (2 * Math.PI * i) / N
+                const cs = Math.cos(t)
+                const sn = Math.sin(t)
+                const x = center.x + vAx * cs + vBx * sn
+                const y = center.y + vAy * cs + vBy * sn
+                if (i === 0) ctx.moveTo(x, y)
+                else ctx.lineTo(x, y)
+            }
+            ctx.stroke()
+        }
+    } else if (activeTool.value === "angle" && sPts.length >= 1 && sPts[0]) {
+        const v = sPts[0]
+        const a = sPts[1] ?? sCursor
+        if (a) {
+            ctx.beginPath()
+            ctx.moveTo(a.x, a.y)
+            ctx.lineTo(v.x, v.y)
+            ctx.stroke()
+        }
+        if (sPts.length >= 2 && sPts[1] && sCursor) {
+            ctx.beginPath()
+            ctx.moveTo(v.x, v.y)
+            ctx.lineTo(sCursor.x, sCursor.y)
+            ctx.stroke()
+        }
+    }
+    ctx.setLineDash([])
+    for (const sp of sPts) {
+        ctx.beginPath()
+        ctx.arc(sp.x, sp.y, 5, 0, Math.PI * 2)
+        ctx.fill()
+    }
+    ctx.restore()
 }
 
 function getCanvasXY(e: MouseEvent | Touch): { x: number; y: number } {
@@ -273,25 +679,419 @@ function getCanvasXY(e: MouseEvent | Touch): { x: number; y: number } {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top }
 }
 
-function onCanvasClick(e: MouseEvent) {
-    if (activeTool.value !== "measure") return
+// Hit-testing helpers. All thresholds are in screen pixels so they feel
+// consistent to the user regardless of zoom level.
+const HANDLE_HIT_PX = 10
+const LINE_HIT_PX = 6
+const ELLIPSE_HIT_PX = 7
 
-    const { x, y } = getCanvasXY(e)
-    const imgPt = screenToImg(x, y)
+function pointToSegmentDistance(
+    p: Point,
+    a: Point,
+    b: Point,
+): number {
+    const abx = b.x - a.x
+    const aby = b.y - a.y
+    const len2 = abx * abx + aby * aby
+    if (len2 === 0) return Math.hypot(p.x - a.x, p.y - a.y)
+    let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2
+    t = Math.max(0, Math.min(1, t))
+    const qx = a.x + t * abx
+    const qy = a.y + t * aby
+    return Math.hypot(p.x - qx, p.y - qy)
+}
 
-    if (measurePoints.value.length < 2) {
-        measurePoints.value.push(imgPt)
-    } else {
-        // Save previous measurement and start new
-        const [a, b] = measurePoints.value as [Point, Point]
-        measureHistory.value.push({
+// Returns the min screen-space distance from cursor to the ellipse curve.
+// Sampled parametrically; 96 samples is overkill for hit-testing but cheap.
+function ellipseCurveDistance(
+    cursor: Point,
+    m: EllipseMeasurement,
+): number {
+    const c = imgToScreen(m.center)
+    const a = imgToScreen(m.axisEndA)
+    const b = imgToScreen(m.axisEndB)
+    const vAx = a.x - c.x
+    const vAy = a.y - c.y
+    const vBx = b.x - c.x
+    const vBy = b.y - c.y
+    let best = Infinity
+    const N = 96
+    for (let i = 0; i < N; i++) {
+        const t = (2 * Math.PI * i) / N
+        const cs = Math.cos(t)
+        const sn = Math.sin(t)
+        const x = c.x + vAx * cs + vBx * sn
+        const y = c.y + vAy * cs + vBy * sn
+        const d = Math.hypot(cursor.x - x, cursor.y - y)
+        if (d < best) best = d
+    }
+    return best
+}
+
+interface HitResult {
+    measurementId: string
+    // "handle" means the user grabbed a specific control point.
+    // "geometry" means they grabbed the line/curve/arms — whole-measurement drag.
+    // "label" means they clicked the label — selection only (drag moves whole).
+    // "delete" means they clicked the delete X button.
+    kind: "handle" | "geometry" | "label" | "delete"
+    handleKey: string | null
+}
+
+function getHandlePositions(m: Measurement): { key: string; pt: Point }[] {
+    if (m.type === "line") {
+        return [
+            { key: "a", pt: m.a },
+            { key: "b", pt: m.b },
+        ]
+    }
+    if (m.type === "ellipse") {
+        return [
+            { key: "center", pt: m.center },
+            { key: "axisEndA", pt: m.axisEndA },
+            { key: "axisEndB", pt: m.axisEndB },
+        ]
+    }
+    return [
+        { key: "vertex", pt: m.vertex },
+        { key: "armA", pt: m.armA },
+        { key: "armB", pt: m.armB },
+    ]
+}
+
+function hitTest(cursorScreen: Point): HitResult | null {
+    const ctx = overlayRef.value?.getContext("2d")
+    if (!ctx) return null
+
+    // Check the selected measurement first — its label/delete button is
+    // visually on top, so its hit region should win ties.
+    const ordered: Measurement[] = []
+    const sel = measurements.value.find((m) => m.id === selectedId.value)
+    if (sel) ordered.push(sel)
+    for (const m of measurements.value) {
+        if (m.id !== selectedId.value) ordered.push(m)
+    }
+
+    // Priority 1: delete button on the selected measurement.
+    if (sel) {
+        const btn = deleteButtonRect(ctx, sel)
+        if (
+            cursorScreen.x >= btn.x &&
+            cursorScreen.x <= btn.x + btn.size &&
+            cursorScreen.y >= btn.y &&
+            cursorScreen.y <= btn.y + btn.size
+        ) {
+            return { measurementId: sel.id, kind: "delete", handleKey: null }
+        }
+    }
+
+    // Priority 2: handles (selected first, so you can always grab the active
+    // measurement's handle even if it overlaps another).
+    for (const m of ordered) {
+        for (const h of getHandlePositions(m)) {
+            const s = imgToScreen(h.pt)
+            if (Math.hypot(cursorScreen.x - s.x, cursorScreen.y - s.y) <= HANDLE_HIT_PX) {
+                return { measurementId: m.id, kind: "handle", handleKey: h.key }
+            }
+        }
+    }
+
+    // Priority 3: labels.
+    for (const m of ordered) {
+        const rect = labelRect(ctx, m)
+        if (
+            cursorScreen.x >= rect.x &&
+            cursorScreen.x <= rect.x + rect.w &&
+            cursorScreen.y >= rect.y &&
+            cursorScreen.y <= rect.y + rect.h
+        ) {
+            return { measurementId: m.id, kind: "label", handleKey: null }
+        }
+    }
+
+    // Priority 4: geometry bodies.
+    for (const m of ordered) {
+        if (m.type === "line") {
+            const sa = imgToScreen(m.a)
+            const sb = imgToScreen(m.b)
+            if (pointToSegmentDistance(cursorScreen, sa, sb) <= LINE_HIT_PX) {
+                return { measurementId: m.id, kind: "geometry", handleKey: null }
+            }
+        } else if (m.type === "ellipse") {
+            if (ellipseCurveDistance(cursorScreen, m) <= ELLIPSE_HIT_PX) {
+                return { measurementId: m.id, kind: "geometry", handleKey: null }
+            }
+        } else {
+            const v = imgToScreen(m.vertex)
+            const a = imgToScreen(m.armA)
+            const b = imgToScreen(m.armB)
+            if (
+                pointToSegmentDistance(cursorScreen, v, a) <= LINE_HIT_PX ||
+                pointToSegmentDistance(cursorScreen, v, b) <= LINE_HIT_PX
+            ) {
+                return { measurementId: m.id, kind: "geometry", handleKey: null }
+            }
+        }
+    }
+
+    return null
+}
+
+function commitPlacement() {
+    const pts = placementPoints.value
+    if (activeTool.value === "line" && pts.length === 2) {
+        const [a, b] = pts as [Point, Point]
+        const id = nanoid()
+        measurements.value.push({
+            id,
+            type: "line",
+            colorIndex: colorCounter,
             a,
             b,
-            distMm: measureDistMm.value ?? 0,
         })
-        measurePoints.value = [imgPt]
+        colorCounter += 1
+        selectedId.value = id
+        placementPoints.value = []
+    } else if (activeTool.value === "ellipse" && pts.length === 3) {
+        const [center, axisEndA, axisEndB] = pts as [Point, Point, Point]
+        const id = nanoid()
+        measurements.value.push({
+            id,
+            type: "ellipse",
+            colorIndex: colorCounter,
+            center,
+            axisEndA,
+            axisEndB,
+        })
+        colorCounter += 1
+        selectedId.value = id
+        placementPoints.value = []
+    } else if (activeTool.value === "angle" && pts.length === 3) {
+        const [vertex, armA, armB] = pts as [Point, Point, Point]
+        const id = nanoid()
+        measurements.value.push({
+            id,
+            type: "angle",
+            colorIndex: colorCounter,
+            vertex,
+            armA,
+            armB,
+        })
+        colorCounter += 1
+        selectedId.value = id
+        placementPoints.value = []
+    }
+}
+
+function handlePlacementClick(imgPt: Point) {
+    if (activeTool.value === "none") return
+    placementPoints.value.push(imgPt)
+    const needed = activeTool.value === "line" ? 2 : 3
+    if (placementPoints.value.length >= needed) {
+        commitPlacement()
+    }
+}
+
+function cancelPlacement() {
+    placementPoints.value = []
+    drawOverlay()
+}
+
+function setTool(tool: ToolMode) {
+    if (activeTool.value === tool) {
+        activeTool.value = "none"
+        placementPoints.value = []
+    } else {
+        activeTool.value = tool
+        placementPoints.value = []
+        selectedId.value = null
     }
     drawOverlay()
+}
+
+function deleteMeasurement(id: string) {
+    measurements.value = measurements.value.filter((m) => m.id !== id)
+    if (selectedId.value === id) selectedId.value = null
+    drawOverlay()
+}
+
+function selectMeasurement(id: string | null) {
+    selectedId.value = id
+    drawOverlay()
+}
+
+function clearMeasurements() {
+    measurements.value = []
+    selectedId.value = null
+    placementPoints.value = []
+    drawOverlay()
+}
+
+// Clones a measurement so we can capture a drag-start snapshot. Plain spread
+// wouldn't deep-copy the nested Point objects, which we mutate per frame.
+function cloneMeasurement(m: Measurement): Measurement {
+    if (m.type === "line") {
+        return { ...m, a: { ...m.a }, b: { ...m.b } }
+    }
+    if (m.type === "ellipse") {
+        return {
+            ...m,
+            center: { ...m.center },
+            axisEndA: { ...m.axisEndA },
+            axisEndB: { ...m.axisEndB },
+        }
+    }
+    return {
+        ...m,
+        vertex: { ...m.vertex },
+        armA: { ...m.armA },
+        armB: { ...m.armB },
+    }
+}
+
+function applyDrag(
+    original: Measurement,
+    mode: DragMode,
+    handleKey: string | null,
+    dx: number,
+    dy: number,
+): Measurement {
+    if (mode === "move") {
+        if (original.type === "line") {
+            return {
+                ...original,
+                a: { x: original.a.x + dx, y: original.a.y + dy },
+                b: { x: original.b.x + dx, y: original.b.y + dy },
+            }
+        }
+        if (original.type === "ellipse") {
+            return {
+                ...original,
+                center: { x: original.center.x + dx, y: original.center.y + dy },
+                axisEndA: { x: original.axisEndA.x + dx, y: original.axisEndA.y + dy },
+                axisEndB: { x: original.axisEndB.x + dx, y: original.axisEndB.y + dy },
+            }
+        }
+        return {
+            ...original,
+            vertex: { x: original.vertex.x + dx, y: original.vertex.y + dy },
+            armA: { x: original.armA.x + dx, y: original.armA.y + dy },
+            armB: { x: original.armB.x + dx, y: original.armB.y + dy },
+        }
+    }
+    if (mode === "handle" && handleKey) {
+        if (original.type === "line") {
+            if (handleKey === "a") return { ...original, a: { x: original.a.x + dx, y: original.a.y + dy } }
+            if (handleKey === "b") return { ...original, b: { x: original.b.x + dx, y: original.b.y + dy } }
+        } else if (original.type === "ellipse") {
+            if (handleKey === "center") {
+                // Dragging the ellipse center translates the whole ellipse so
+                // the axis endpoints keep their conjugate relationship.
+                return {
+                    ...original,
+                    center: { x: original.center.x + dx, y: original.center.y + dy },
+                    axisEndA: { x: original.axisEndA.x + dx, y: original.axisEndA.y + dy },
+                    axisEndB: { x: original.axisEndB.x + dx, y: original.axisEndB.y + dy },
+                }
+            }
+            if (handleKey === "axisEndA") {
+                return { ...original, axisEndA: { x: original.axisEndA.x + dx, y: original.axisEndA.y + dy } }
+            }
+            if (handleKey === "axisEndB") {
+                return { ...original, axisEndB: { x: original.axisEndB.x + dx, y: original.axisEndB.y + dy } }
+            }
+        } else {
+            if (handleKey === "vertex") {
+                // Like ellipse center: dragging vertex carries the arms so the
+                // angle shape is preserved.
+                return {
+                    ...original,
+                    vertex: { x: original.vertex.x + dx, y: original.vertex.y + dy },
+                    armA: { x: original.armA.x + dx, y: original.armA.y + dy },
+                    armB: { x: original.armB.x + dx, y: original.armB.y + dy },
+                }
+            }
+            if (handleKey === "armA") {
+                return { ...original, armA: { x: original.armA.x + dx, y: original.armA.y + dy } }
+            }
+            if (handleKey === "armB") {
+                return { ...original, armB: { x: original.armB.x + dx, y: original.armB.y + dy } }
+            }
+        }
+    }
+    return original
+}
+
+function updateMeasurement(id: string, next: Measurement) {
+    const idx = measurements.value.findIndex((m) => m.id === id)
+    if (idx === -1) return
+    measurements.value[idx] = next
+}
+
+function pointerDown(screenX: number, screenY: number): "measurement" | "pan" {
+    const cursor = { x: screenX, y: screenY }
+    const hit = hitTest(cursor)
+    if (!hit) {
+        // Empty-space click: deselect, fall through to pan behavior.
+        if (selectedId.value !== null) {
+            selectedId.value = null
+            drawOverlay()
+        }
+        return "pan"
+    }
+
+    if (hit.kind === "delete") {
+        deleteMeasurement(hit.measurementId)
+        return "measurement"
+    }
+
+    selectedId.value = hit.measurementId
+    const target = measurements.value.find((m) => m.id === hit.measurementId)
+    if (!target) {
+        drawOverlay()
+        return "measurement"
+    }
+
+    const mode: DragMode = hit.kind === "handle" ? "handle" : "move"
+    dragState = {
+        mode,
+        measurementId: target.id,
+        handleKey: hit.handleKey,
+        startImg: screenToImg(screenX, screenY),
+        startSnapshot: cloneMeasurement(target),
+        moved: false,
+    }
+    drawOverlay()
+    return "measurement"
+}
+
+function pointerMove(screenX: number, screenY: number): boolean {
+    if (!dragState) return false
+    const nowImg = screenToImg(screenX, screenY)
+    const dxImg = nowImg.x - dragState.startImg.x
+    const dyImg = nowImg.y - dragState.startImg.y
+    if (!dragState.moved) {
+        // Convert image-space delta back to screen-space via viewScale; easier
+        // than tracking the original screen cursor separately.
+        const screenDx = dxImg * viewScale.value
+        const screenDy = dyImg * viewScale.value
+        if (Math.hypot(screenDx, screenDy) < DRAG_THRESHOLD_PX) return true
+        dragState.moved = true
+    }
+    const next = applyDrag(
+        dragState.startSnapshot,
+        dragState.mode,
+        dragState.handleKey,
+        dxImg,
+        dyImg,
+    )
+    updateMeasurement(dragState.measurementId, next)
+    drawOverlay()
+    return true
+}
+
+function pointerUp() {
+    dragState = null
 }
 
 function onWheel(e: WheelEvent) {
@@ -313,12 +1113,31 @@ function onWheel(e: WheelEvent) {
 }
 
 function onMouseDown(e: MouseEvent) {
-    if (activeTool.value === "measure") return
-    isPanning = true
-    panStart = { x: e.clientX - viewOffsetX.value, y: e.clientY - viewOffsetY.value }
+    const { x, y } = getCanvasXY(e)
+    if (activeTool.value !== "none") {
+        // Placement tools ignore mousedown; they commit on click so a user
+        // can drag-scroll accidentally without placing a spurious point.
+        return
+    }
+    const outcome = pointerDown(x, y)
+    if (outcome === "pan") {
+        isPanning = true
+        panStart = { x: e.clientX - viewOffsetX.value, y: e.clientY - viewOffsetY.value }
+    }
 }
 
 function onMouseMove(e: MouseEvent) {
+    if (dragState) {
+        const { x, y } = getCanvasXY(e)
+        pointerMove(x, y)
+        return
+    }
+    if (activeTool.value !== "none") {
+        const { x, y } = getCanvasXY(e)
+        placementCursor.value = screenToImg(x, y)
+        drawOverlay()
+        return
+    }
     if (!isPanning) return
     viewOffsetX.value = e.clientX - panStart.x
     viewOffsetY.value = e.clientY - panStart.y
@@ -326,7 +1145,26 @@ function onMouseMove(e: MouseEvent) {
 }
 
 function onMouseUp() {
+    pointerUp()
     isPanning = false
+}
+
+function onMouseLeave() {
+    pointerUp()
+    isPanning = false
+    placementCursor.value = null
+    drawOverlay()
+}
+
+function onClick(e: MouseEvent) {
+    if (activeTool.value === "none") return
+    // Guard against the click event that always follows a mousedown: if the
+    // user panned or dragged, that wasn't a placement click. Here we have no
+    // dragState at click-time because placements don't start one.
+    const { x, y } = getCanvasXY(e)
+    const imgPt = screenToImg(x, y)
+    handlePlacementClick(imgPt)
+    drawOverlay()
 }
 
 function onTouchStart(e: TouchEvent) {
@@ -338,11 +1176,23 @@ function onTouchStart(e: TouchEvent) {
             t1.clientX - t0.clientX,
             t1.clientY - t0.clientY,
         )
-    } else if (e.touches.length === 1 && t0 && activeTool.value !== "measure") {
-        isPanning = true
-        panStart = {
-            x: t0.clientX - viewOffsetX.value,
-            y: t0.clientY - viewOffsetY.value,
+        // Cancel any in-progress drag when a second finger lands; pinch takes
+        // priority.
+        pointerUp()
+        isPanning = false
+    } else if (e.touches.length === 1 && t0) {
+        const { x, y } = getCanvasXY(t0)
+        if (activeTool.value !== "none") {
+            placementCursor.value = screenToImg(x, y)
+            return
+        }
+        const outcome = pointerDown(x, y)
+        if (outcome === "pan") {
+            isPanning = true
+            panStart = {
+                x: t0.clientX - viewOffsetX.value,
+                y: t0.clientY - viewOffsetY.value,
+            }
         }
     }
 }
@@ -372,35 +1222,92 @@ function onTouchMove(e: TouchEvent) {
 
         lastPinchDist = dist
         redraw()
-    } else if (e.touches.length === 1 && t0 && isPanning) {
-        viewOffsetX.value = t0.clientX - panStart.x
-        viewOffsetY.value = t0.clientY - panStart.y
-        redraw()
+    } else if (e.touches.length === 1 && t0) {
+        const { x, y } = getCanvasXY(t0)
+        if (dragState) {
+            e.preventDefault()
+            pointerMove(x, y)
+            return
+        }
+        if (activeTool.value !== "none") {
+            placementCursor.value = screenToImg(x, y)
+            drawOverlay()
+            return
+        }
+        if (isPanning) {
+            viewOffsetX.value = t0.clientX - panStart.x
+            viewOffsetY.value = t0.clientY - panStart.y
+            redraw()
+        }
     }
 }
 
 function onTouchEnd() {
+    // Placement on touch relies on the browser-synthesized click that fires
+    // after a tap with no preventDefault — same as the original file did.
+    pointerUp()
     isPanning = false
     lastPinchDist = 0
+    drawOverlay()
 }
 
-function toggleMeasure() {
-    if (activeTool.value === "measure") {
-        activeTool.value = "none"
-    } else {
-        activeTool.value = "measure"
-        measurePoints.value = []
+function onKeyDown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+        if (activeTool.value !== "none" && placementPoints.value.length > 0) {
+            cancelPlacement()
+            return
+        }
+        if (activeTool.value !== "none") {
+            activeTool.value = "none"
+            drawOverlay()
+            return
+        }
+        if (selectedId.value !== null) {
+            selectedId.value = null
+            drawOverlay()
+        }
+        return
     }
-    drawOverlay()
+    if ((e.key === "Delete" || e.key === "Backspace") && selectedId.value) {
+        // Only handle when the overlay is the active context; text inputs
+        // inside the toolbar need Backspace for editing.
+        const target = e.target as HTMLElement | null
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return
+        e.preventDefault()
+        deleteMeasurement(selectedId.value)
+    }
 }
 
-function clearMeasurements() {
-    measurePoints.value = []
-    measureHistory.value = []
-    drawOverlay()
-}
+const placementHint = computed<string | null>(() => {
+    if (activeTool.value === "none") return null
+    const n = placementPoints.value.length
+    if (activeTool.value === "line") {
+        if (n === 0) return "Click the first endpoint."
+        return "Click the second endpoint."
+    }
+    if (activeTool.value === "ellipse") {
+        if (n === 0) return "Click the ellipse center."
+        if (n === 1) return "Click the first semi-axis endpoint."
+        return "Click the second semi-axis endpoint."
+    }
+    if (n === 0) return "Click the angle vertex."
+    if (n === 1) return "Click the first arm endpoint."
+    return "Click the second arm endpoint."
+})
 
-// Scale bar export
+const measurementSummaries = computed(() => {
+    return measurements.value.map((m) => ({
+        id: m.id,
+        type: m.type,
+        typeLabel: measurementTypeLabel(m),
+        label: measurementLabel(m),
+        color: getDatumColor(m.colorIndex),
+        selected: m.id === selectedId.value,
+    }))
+})
+
+// Scale bar export — unchanged from the previous version, preserved verbatim
+// so downstream callers (ResultViewer) keep working if they ever wire it up.
 function exportWithScaleBar(): Promise<Blob> {
     return new Promise((resolve, reject) => {
         const image = img.value
@@ -414,7 +1321,6 @@ function exportWithScaleBar(): Promise<Blob> {
         const ih = image.naturalHeight
         console.log(`[scale-bar] image ${String(iw)}×${String(ih)}, scale=${String(props.scalePxPerMm)} px/mm`)
 
-        // Scale font/bar sizes relative to image width
         const unit = Math.max(iw / 100, 8)
         const barHeightPx = Math.round(unit * 5)
         const canvas = document.createElement("canvas")
@@ -427,14 +1333,11 @@ function exportWithScaleBar(): Promise<Blob> {
             return
         }
 
-        // Draw image
         ctx.drawImage(image, 0, 0)
 
-        // Draw bar background
         ctx.fillStyle = "#000"
         ctx.fillRect(0, ih, iw, barHeightPx)
 
-        // Determine a nice scale bar length (~20% of image width)
         const imgWidthMm = iw / props.scalePxPerMm
         const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
         const targetMm = imgWidthMm * 0.2
@@ -453,15 +1356,12 @@ function exportWithScaleBar(): Promise<Blob> {
 
         console.log(`[scale-bar] barMm=${String(barMm)}, barWidthPx=${barWidthPx.toFixed(0)}, barHeight=${String(barHeightPx)}, unit=${unit.toFixed(1)}`)
 
-        // Draw bar
         ctx.fillStyle = "#fff"
         ctx.fillRect(barX, barY - barThick / 2, barWidthPx, barThick)
 
-        // End ticks
         ctx.fillRect(barX, barY - tickH / 2, Math.max(2, unit * 0.15), tickH)
         ctx.fillRect(barX + barWidthPx - Math.max(2, unit * 0.15), barY - tickH / 2, Math.max(2, unit * 0.15), tickH)
 
-        // Label above bar
         const fontSize = Math.round(unit * 1.4)
         const label = `${String(barMm)} mm`
         ctx.font = `bold ${String(fontSize)}px monospace`
@@ -470,7 +1370,6 @@ function exportWithScaleBar(): Promise<Blob> {
         ctx.textBaseline = "bottom"
         ctx.fillText(label, barX + barWidthPx / 2, barY - tickH / 2 - Math.round(unit * 0.3))
 
-        // Scale info on the right
         const smallFont = Math.round(unit * 1)
         ctx.textAlign = "right"
         ctx.textBaseline = "middle"
@@ -505,56 +1404,108 @@ onMounted(() => {
         })
         resizeObs.observe(containerRef.value)
     }
+    window.addEventListener("keydown", onKeyDown)
 })
 
 onUnmounted(() => {
     resizeObs?.disconnect()
+    window.removeEventListener("keydown", onKeyDown)
 })
 
 watch(() => props.imageUrl, loadImg)
 watch(showGrid, () => { drawOverlay() })
 watch(gridSpacingMm, () => { drawOverlay() })
+watch(() => props.scalePxPerMm, () => { drawOverlay() })
 </script>
 
 <template>
     <div class="space-y-3">
         <!-- Toolbar -->
         <div class="flex flex-wrap items-center gap-2 text-sm">
-            <button
-                class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors"
-                :class="
-                    activeTool === 'measure'
-                        ? 'border-primary bg-primary/10 text-primary'
-                        : 'border-border text-muted-foreground hover:text-foreground'
-                "
-                @click="toggleMeasure"
-            >
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
+            <div class="inline-flex rounded-md border border-border p-0.5">
+                <button
+                    class="inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors"
+                    :class="
+                        activeTool === 'line'
+                            ? 'bg-primary/10 text-primary'
+                            : 'text-muted-foreground hover:text-foreground'
+                    "
+                    @click="setTool('line')"
                 >
-                    <path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z" />
-                    <path d="m14.5 12.5 2-2" />
-                    <path d="m11.5 9.5 2-2" />
-                    <path d="m8.5 6.5 2-2" />
-                    <path d="m17.5 15.5 2-2" />
-                </svg>
-                Measure
-            </button>
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <line x1="4" y1="20" x2="20" y2="4" />
+                        <circle cx="4" cy="20" r="1.5" />
+                        <circle cx="20" cy="4" r="1.5" />
+                    </svg>
+                    Line
+                </button>
+                <button
+                    class="inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors"
+                    :class="
+                        activeTool === 'ellipse'
+                            ? 'bg-primary/10 text-primary'
+                            : 'text-muted-foreground hover:text-foreground'
+                    "
+                    @click="setTool('ellipse')"
+                >
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <ellipse cx="12" cy="12" rx="9" ry="6" />
+                    </svg>
+                    Ellipse
+                </button>
+                <button
+                    class="inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors"
+                    :class="
+                        activeTool === 'angle'
+                            ? 'bg-primary/10 text-primary'
+                            : 'text-muted-foreground hover:text-foreground'
+                    "
+                    @click="setTool('angle')"
+                >
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <path d="M4 20 L20 20 L4 6 Z" fill="none" />
+                        <path d="M10 20 a6 6 0 0 0 -3.5 -8.5" />
+                    </svg>
+                    Angle
+                </button>
+            </div>
 
             <button
-                v-if="measureHistory.length > 0 || measurePoints.length > 0"
+                v-if="measurements.length > 0 || placementPoints.length > 0"
                 class="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:text-destructive"
                 @click="clearMeasurements"
             >
-                Clear
+                Clear all
             </button>
 
             <div class="mx-1 h-4 w-px bg-border" />
@@ -585,54 +1536,98 @@ watch(gridSpacingMm, () => { drawOverlay() })
             >
         </div>
 
-        <!-- Measurement readout -->
+        <!-- Placement hint -->
         <div
-            v-if="activeTool === 'measure'"
+            v-if="placementHint"
             class="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm"
         >
-            <template v-if="measurePoints.length === 0">
-                Click two points on the image to measure distance.
-            </template>
-            <template v-else-if="measurePoints.length === 1">
-                Click a second point.
-            </template>
-            <template v-else-if="measureDistMm != null">
-                Distance:
-                <span class="font-mono font-semibold">
-                    {{ measureDistMm >= 10
-                        ? measureDistMm.toFixed(1)
-                        : measureDistMm.toFixed(2)
-                    }} mm
-                </span>
-                <span class="ml-2 text-muted-foreground">
-                    (click to start a new measurement)
-                </span>
-            </template>
+            {{ placementHint }}
+            <span class="ml-2 text-xs text-muted-foreground">
+                Press Escape to cancel.
+            </span>
         </div>
 
-        <!-- Canvas area -->
-        <div
-            ref="containerRef"
-            class="relative h-[500px] overflow-hidden rounded-lg border border-border bg-muted"
-            :class="activeTool === 'measure' ? 'cursor-crosshair' : 'cursor-grab'"
-        >
-            <canvas
-                ref="canvasRef"
-                class="absolute inset-0"
-            />
-            <canvas
-                ref="overlayRef"
-                class="absolute inset-0"
-                @click="onCanvasClick"
-                @wheel.prevent="onWheel"
-                @mousedown="onMouseDown"
-                @mousemove="onMouseMove"
-                @mouseup="onMouseUp"
-                @mouseleave="onMouseUp"
-                @touchstart="onTouchStart"
-                @touchmove="onTouchMove"
-                @touchend="onTouchEnd"
-            />
+        <!-- Canvas + side list -->
+        <div class="grid gap-3 md:grid-cols-[1fr_220px]">
+            <div
+                ref="containerRef"
+                class="relative h-[500px] overflow-hidden rounded-lg border border-border bg-muted"
+                :class="activeTool !== 'none' ? 'cursor-crosshair' : 'cursor-grab'"
+            >
+                <canvas
+                    ref="canvasRef"
+                    class="absolute inset-0"
+                />
+                <canvas
+                    ref="overlayRef"
+                    class="absolute inset-0 touch-none"
+                    @click="onClick"
+                    @wheel.prevent="onWheel"
+                    @mousedown="onMouseDown"
+                    @mousemove="onMouseMove"
+                    @mouseup="onMouseUp"
+                    @mouseleave="onMouseLeave"
+                    @touchstart="onTouchStart"
+                    @touchmove="onTouchMove"
+                    @touchend="onTouchEnd"
+                    @touchcancel="onTouchEnd"
+                />
+            </div>
+
+            <!-- Measurement list -->
+            <div
+                class="flex max-h-[500px] flex-col gap-1 overflow-y-auto rounded-lg border border-border bg-muted/30 p-2"
+            >
+                <div
+                    v-if="measurementSummaries.length === 0"
+                    class="px-2 py-3 text-xs text-muted-foreground"
+                >
+                    No measurements yet. Pick a tool above and click on the image.
+                </div>
+                <button
+                    v-for="m in measurementSummaries"
+                    :key="m.id"
+                    class="group flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs transition-colors"
+                    :class="
+                        m.selected
+                            ? 'border-primary bg-primary/10'
+                            : 'border-transparent hover:border-border hover:bg-muted'
+                    "
+                    @click="selectMeasurement(m.id)"
+                >
+                    <span
+                        class="inline-block h-3 w-3 shrink-0 rounded-full border border-border"
+                        :style="{ backgroundColor: m.color }"
+                    />
+                    <span class="shrink-0 font-medium text-foreground">
+                        {{ m.typeLabel }}
+                    </span>
+                    <span class="truncate font-mono text-muted-foreground">
+                        {{ m.label }}
+                    </span>
+                    <button
+                        class="ml-auto shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+                        :class="m.selected ? 'opacity-100' : ''"
+                        title="Delete measurement"
+                        @click.stop="deleteMeasurement(m.id)"
+                    >
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="12"
+                            height="12"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2.5"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                        >
+                            <path d="M18 6 6 18" />
+                            <path d="m6 6 12 12" />
+                        </svg>
+                    </button>
+                </button>
+            </div>
         </div>
     </div>
 </template>

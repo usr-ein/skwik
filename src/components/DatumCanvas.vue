@@ -53,7 +53,9 @@ function datumIndex(datum: Datum): number {
 function datumPoints(datum: Datum): Point[] {
     if (datum.type === "rectangle") return datum.corners as unknown as Point[]
     if (datum.type === "line") return datum.endpoints as unknown as Point[]
-    return [datum.center, datum.axisEndA, datum.axisEndB]
+    // Index 0 is the center (translate all); 1..N are the on-curve points
+    // the user drags to reshape the fitted ellipse.
+    return [datum.center, ...datum.points]
 }
 
 function getPointConfigs(datum: Datum, dIdx: number) {
@@ -230,24 +232,20 @@ function onPointDragMove(e: {
         newEndpoints[_pointIndex] = newPos
         store.updateDatum(_datumId, { endpoints: newEndpoints })
     } else if (_pointIndex === 0) {
-        // Ellipse center — translate all three handles together
+        // Ellipse center — translate all on-curve points by the same delta
+        // and let the store refit.
         const dx = newPos.x - datum.center.x
         const dy = newPos.y - datum.center.y
-        store.updateDatum(_datumId, {
-            center: newPos,
-            axisEndA: {
-                x: datum.axisEndA.x + dx,
-                y: datum.axisEndA.y + dy,
-            },
-            axisEndB: {
-                x: datum.axisEndB.x + dx,
-                y: datum.axisEndB.y + dy,
-            },
-        })
-    } else if (_pointIndex === 1) {
-        store.updateDatum(_datumId, { axisEndA: newPos })
+        const translated = datum.points.map((p) => ({
+            x: p.x + dx,
+            y: p.y + dy,
+        }))
+        store.updateEllipsePoints(_datumId, translated)
     } else {
-        store.updateDatum(_datumId, { axisEndB: newPos })
+        const newPoints = datum.points.map((p, i) =>
+            i === _pointIndex - 1 ? newPos : p,
+        )
+        store.updateEllipsePoints(_datumId, newPoints)
     }
 }
 

@@ -11,7 +11,12 @@ export interface RectDatum {
     heightMm: number
     confidence: 1 | 2 | 3 | 4 | 5
     label: string
+    /** When true, this rectangle defines the world axes: TL→TR is +x,
+     *  TL→BL is +y. At most one datum in the set may hold the axis role. */
+    isAxisReference?: boolean
 }
+
+export type LineAxisRole = "x" | "y" | null
 
 export interface LineDatum {
     id: string
@@ -20,16 +25,25 @@ export interface LineDatum {
     lengthMm: number
     confidence: 1 | 2 | 3 | 4 | 5
     label: string
+    /** Marks this line as the world axis reference. "x" maps endpoint[0]
+     *  to origin and endpoint[1] to (+L, 0); "y" maps to (0, +L). At most
+     *  one datum in the set may hold the axis role. */
+    axisRole?: LineAxisRole
 }
 
 export interface EllipseDatum {
     id: string
     type: "ellipse"
-    /** Image-space ellipse as 3 free points: center + two conjugate
-     * semi-axis endpoints. axisEndA/axisEndB don't need to be perpendicular;
-     * together with center they give a full 5-DoF ellipse matrix. */
+    /** User-placed points on the circle contour (≥5, default 8). The
+     *  best-fit ellipse is refitted each time this array changes; the
+     *  `center`/`axisEndA`/`axisEndB` fields below are that fit cached
+     *  on the datum for use by renderers and the solver. */
+    points: Point[]
     center: Point
+    /** Offset endpoint of the fitted semi-major axis from `center`. */
     axisEndA: Point
+    /** Offset endpoint of the fitted semi-minor axis from `center`
+     *  (perpendicular to axisEndA). */
     axisEndB: Point
     /** Known real-world diameter of the circle being drawn. */
     diameterMm: number
