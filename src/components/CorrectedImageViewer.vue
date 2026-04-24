@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue"
+import { useMediaQuery } from "@vueuse/core"
 import { nanoid } from "nanoid"
 import type { Point } from "@/types"
 import { getDatumColor } from "@/lib/datums"
@@ -8,6 +9,15 @@ const props = defineProps<{
     imageUrl: string
     scalePxPerMm: number
 }>()
+
+const isMobile = useMediaQuery("(max-width: 767px)")
+
+// Mirror the datum-editor precedent: leave more vertical room for the mobile
+// toolbar/chrome than desktop. Keep the canvas and the side list the same
+// height so they align on desktop.
+const canvasHeightClass = computed(() =>
+    isMobile.value ? "h-[calc(100vh-14rem)]" : "h-[calc(100vh-12rem)]",
+)
 
 const containerRef = ref<HTMLDivElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -311,8 +321,8 @@ function measurementTypeLabel(m: Measurement): string {
     return "Angle"
 }
 
-// Anchor point in image space where we place the label/delete button. Chosen
-// per type so the label sits in a predictable, non-occluding position.
+// Anchor point in image space where we place the label. Chosen per type so
+// the label sits in a predictable, non-occluding position.
 function labelAnchor(m: Measurement): Point {
     if (m.type === "line") {
         return { x: (m.a.x + m.b.x) / 2, y: (m.a.y + m.b.y) / 2 }
@@ -345,28 +355,13 @@ function labelRect(
     return { x, y, w, h, textX: anchor.x, textY: anchor.y - offsetY }
 }
 
-// Delete button sits immediately to the right of the label. Same screen-space
-// rect is used for hit testing and for drawing.
-function deleteButtonRect(
-    ctx: CanvasRenderingContext2D,
-    m: Measurement,
-): { x: number; y: number; size: number } {
-    const rect = labelRect(ctx, m)
-    const size = 18
-    return {
-        x: rect.x + rect.w + 4,
-        y: rect.y + (rect.h - size) / 2,
-        size,
-    }
-}
-
 function drawMeasurement(
     ctx: CanvasRenderingContext2D,
     m: Measurement,
     isSelected: boolean,
 ) {
     const baseColor = getDatumColor(m.colorIndex)
-    const color = isSelected ? "#ffffff" : baseColor
+    const strokeColor = isSelected ? "#ffffff" : baseColor
     const lineAlpha = isSelected ? 1.0 : 0.8
     const lineWidth = isSelected ? 3 : 2
 
@@ -374,11 +369,11 @@ function drawMeasurement(
     ctx.globalAlpha = lineAlpha
 
     if (m.type === "line") {
-        drawLineGeometry(ctx, m, color, lineWidth, isSelected)
+        drawLineGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
     } else if (m.type === "ellipse") {
-        drawEllipseGeometry(ctx, m, color, lineWidth, isSelected)
+        drawEllipseGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
     } else {
-        drawAngleGeometry(ctx, m, color, lineWidth, isSelected)
+        drawAngleGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
     }
 
     ctx.globalAlpha = 1.0
@@ -389,7 +384,8 @@ function drawMeasurement(
 function drawLineGeometry(
     ctx: CanvasRenderingContext2D,
     m: LineMeasurement,
-    color: string,
+    strokeColor: string,
+    handleColor: string,
     lineWidth: number,
     isSelected: boolean,
 ) {
@@ -398,19 +394,20 @@ function drawLineGeometry(
     ctx.beginPath()
     ctx.moveTo(sa.x, sa.y)
     ctx.lineTo(sb.x, sb.y)
-    ctx.strokeStyle = color
+    ctx.strokeStyle = strokeColor
     ctx.lineWidth = lineWidth
     ctx.setLineDash(isSelected ? [] : [6, 3])
     ctx.stroke()
     ctx.setLineDash([])
-    drawHandle(ctx, sa, color, isSelected)
-    drawHandle(ctx, sb, color, isSelected)
+    drawHandle(ctx, sa, handleColor, isSelected)
+    drawHandle(ctx, sb, handleColor, isSelected)
 }
 
 function drawEllipseGeometry(
     ctx: CanvasRenderingContext2D,
     m: EllipseMeasurement,
-    color: string,
+    strokeColor: string,
+    handleColor: string,
     lineWidth: number,
     isSelected: boolean,
 ) {
@@ -435,13 +432,12 @@ function drawEllipseGeometry(
         if (i === 0) ctx.moveTo(x, y)
         else ctx.lineTo(x, y)
     }
-    ctx.strokeStyle = color
+    ctx.strokeStyle = strokeColor
     ctx.lineWidth = lineWidth
     ctx.setLineDash(isSelected ? [] : [6, 3])
     ctx.stroke()
     ctx.setLineDash([])
 
-    // Axis guides
     ctx.save()
     ctx.globalAlpha *= 0.5
     ctx.beginPath()
@@ -449,20 +445,21 @@ function drawEllipseGeometry(
     ctx.lineTo(a.x, a.y)
     ctx.moveTo(c.x, c.y)
     ctx.lineTo(b.x, b.y)
-    ctx.strokeStyle = color
+    ctx.strokeStyle = strokeColor
     ctx.lineWidth = 1
     ctx.stroke()
     ctx.restore()
 
-    drawHandle(ctx, c, color, isSelected, true)
-    drawHandle(ctx, a, color, isSelected)
-    drawHandle(ctx, b, color, isSelected)
+    drawHandle(ctx, c, handleColor, isSelected, true)
+    drawHandle(ctx, a, handleColor, isSelected)
+    drawHandle(ctx, b, handleColor, isSelected)
 }
 
 function drawAngleGeometry(
     ctx: CanvasRenderingContext2D,
     m: AngleMeasurement,
-    color: string,
+    strokeColor: string,
+    handleColor: string,
     lineWidth: number,
     isSelected: boolean,
 ) {
@@ -474,13 +471,12 @@ function drawAngleGeometry(
     ctx.moveTo(a.x, a.y)
     ctx.lineTo(v.x, v.y)
     ctx.lineTo(b.x, b.y)
-    ctx.strokeStyle = color
+    ctx.strokeStyle = strokeColor
     ctx.lineWidth = lineWidth
     ctx.setLineDash(isSelected ? [] : [6, 3])
     ctx.stroke()
     ctx.setLineDash([])
 
-    // Arc sweep between the two arms to make the angle visually obvious.
     const lenA = Math.hypot(a.x - v.x, a.y - v.y)
     const lenB = Math.hypot(b.x - v.x, b.y - v.y)
     const arcR = Math.max(16, Math.min(lenA, lenB) * 0.3)
@@ -496,17 +492,26 @@ function drawAngleGeometry(
         ctx.globalAlpha *= 0.6
         ctx.beginPath()
         ctx.arc(v.x, v.y, arcR, thetaA, thetaA + delta, delta < 0)
-        ctx.strokeStyle = color
+        ctx.strokeStyle = strokeColor
         ctx.lineWidth = 1.5
         ctx.stroke()
         ctx.restore()
     }
 
-    drawHandle(ctx, v, color, isSelected, true)
-    drawHandle(ctx, a, color, isSelected)
-    drawHandle(ctx, b, color, isSelected)
+    drawHandle(ctx, v, handleColor, isSelected, true)
+    drawHandle(ctx, a, handleColor, isSelected)
+    drawHandle(ctx, b, handleColor, isSelected)
 }
 
+// Handle rendering follows the datum-editor precedent: a filled color center
+// ringed in white. Size and alpha depend on the measurement's selection
+// state so the user always sees where to grab, but unselected handles stay
+// visually quiet.
+//   unselected: 3 px radius @ 0.5 alpha
+//   selected primary (center/vertex): 8 px radius, full alpha, thicker ring
+//   selected secondary: 6.5 px radius, full alpha
+// The invisible hit region (HANDLE_HIT_PX) is wider than any of these so
+// grabbing is forgiving even on tiny unselected dots.
 function drawHandle(
     ctx: CanvasRenderingContext2D,
     s: Point,
@@ -514,14 +519,27 @@ function drawHandle(
     isSelected: boolean,
     primary = false,
 ) {
-    const r = primary ? 6 : 5
-    ctx.beginPath()
-    ctx.arc(s.x, s.y, r, 0, Math.PI * 2)
-    ctx.fillStyle = color
-    ctx.fill()
-    ctx.strokeStyle = isSelected ? "#0b0b0b" : "#ffffff"
-    ctx.lineWidth = 1.5
-    ctx.stroke()
+    ctx.save()
+    if (isSelected) {
+        const r = primary ? 8 : 6.5
+        ctx.beginPath()
+        ctx.arc(s.x, s.y, r, 0, Math.PI * 2)
+        ctx.fillStyle = color
+        ctx.fill()
+        ctx.strokeStyle = "#ffffff"
+        ctx.lineWidth = 2
+        ctx.stroke()
+    } else {
+        ctx.globalAlpha = 0.5
+        ctx.beginPath()
+        ctx.arc(s.x, s.y, 3, 0, Math.PI * 2)
+        ctx.fillStyle = color
+        ctx.fill()
+        ctx.strokeStyle = "#ffffff"
+        ctx.lineWidth = 1
+        ctx.stroke()
+    }
+    ctx.restore()
 }
 
 function drawLabel(
@@ -550,27 +568,6 @@ function drawLabel(
     ctx.textAlign = "start"
     ctx.textBaseline = "alphabetic"
     ctx.restore()
-
-    if (isSelected) {
-        const btn = deleteButtonRect(ctx, m)
-        ctx.save()
-        ctx.fillStyle = "#ef4444"
-        roundRect(ctx, btn.x, btn.y, btn.size, btn.size, 4)
-        ctx.fill()
-        ctx.strokeStyle = "#ffffff"
-        ctx.lineWidth = 1
-        ctx.stroke()
-        ctx.strokeStyle = "#ffffff"
-        ctx.lineWidth = 1.75
-        ctx.beginPath()
-        const pad = 5
-        ctx.moveTo(btn.x + pad, btn.y + pad)
-        ctx.lineTo(btn.x + btn.size - pad, btn.y + btn.size - pad)
-        ctx.moveTo(btn.x + btn.size - pad, btn.y + pad)
-        ctx.lineTo(btn.x + pad, btn.y + btn.size - pad)
-        ctx.stroke()
-        ctx.restore()
-    }
 }
 
 function roundRect(
@@ -681,7 +678,9 @@ function getCanvasXY(e: MouseEvent | Touch): { x: number; y: number } {
 
 // Hit-testing helpers. All thresholds are in screen pixels so they feel
 // consistent to the user regardless of zoom level.
-const HANDLE_HIT_PX = 10
+// Generous invisible hotspot around each handle so precision grabs feel
+// forgiving on small unselected dots. Larger than any rendered handle.
+const HANDLE_HIT_PX = 14
 const LINE_HIT_PX = 6
 const ELLIPSE_HIT_PX = 7
 
@@ -733,8 +732,7 @@ interface HitResult {
     // "handle" means the user grabbed a specific control point.
     // "geometry" means they grabbed the line/curve/arms — whole-measurement drag.
     // "label" means they clicked the label — selection only (drag moves whole).
-    // "delete" means they clicked the delete X button.
-    kind: "handle" | "geometry" | "label" | "delete"
+    kind: "handle" | "geometry" | "label"
     handleKey: string | null
 }
 
@@ -763,8 +761,8 @@ function hitTest(cursorScreen: Point): HitResult | null {
     const ctx = overlayRef.value?.getContext("2d")
     if (!ctx) return null
 
-    // Check the selected measurement first — its label/delete button is
-    // visually on top, so its hit region should win ties.
+    // Check the selected measurement first — its label is visually on top,
+    // so its hit region should win ties.
     const ordered: Measurement[] = []
     const sel = measurements.value.find((m) => m.id === selectedId.value)
     if (sel) ordered.push(sel)
@@ -772,21 +770,9 @@ function hitTest(cursorScreen: Point): HitResult | null {
         if (m.id !== selectedId.value) ordered.push(m)
     }
 
-    // Priority 1: delete button on the selected measurement.
-    if (sel) {
-        const btn = deleteButtonRect(ctx, sel)
-        if (
-            cursorScreen.x >= btn.x &&
-            cursorScreen.x <= btn.x + btn.size &&
-            cursorScreen.y >= btn.y &&
-            cursorScreen.y <= btn.y + btn.size
-        ) {
-            return { measurementId: sel.id, kind: "delete", handleKey: null }
-        }
-    }
-
-    // Priority 2: handles (selected first, so you can always grab the active
-    // measurement's handle even if it overlaps another).
+    // Priority 1: handles (selected first, so you can always grab the active
+    // measurement's handle even if it overlaps another). Handles beat geometry
+    // so precision grabs on endpoints always win over a line-body grab.
     for (const m of ordered) {
         for (const h of getHandlePositions(m)) {
             const s = imgToScreen(h.pt)
@@ -796,7 +782,7 @@ function hitTest(cursorScreen: Point): HitResult | null {
         }
     }
 
-    // Priority 3: labels.
+    // Priority 2: labels.
     for (const m of ordered) {
         const rect = labelRect(ctx, m)
         if (
@@ -809,7 +795,7 @@ function hitTest(cursorScreen: Point): HitResult | null {
         }
     }
 
-    // Priority 4: geometry bodies.
+    // Priority 3: geometry bodies.
     for (const m of ordered) {
         if (m.type === "line") {
             const sa = imgToScreen(m.a)
@@ -1038,11 +1024,6 @@ function pointerDown(screenX: number, screenY: number): "measurement" | "pan" {
             drawOverlay()
         }
         return "pan"
-    }
-
-    if (hit.kind === "delete") {
-        deleteMeasurement(hit.measurementId)
-        return "measurement"
     }
 
     selectedId.value = hit.measurementId
@@ -1547,12 +1528,17 @@ watch(() => props.scalePxPerMm, () => { drawOverlay() })
             </span>
         </div>
 
-        <!-- Canvas + side list -->
+        <!-- Canvas + side list. The parent ResultViewer clamps width to
+             max-w-4xl; widening the canvas beyond that requires a parent
+             change (see ResultViewer.vue root container). -->
         <div class="grid gap-3 md:grid-cols-[1fr_220px]">
             <div
                 ref="containerRef"
-                class="relative h-[500px] overflow-hidden rounded-lg border border-border bg-muted"
-                :class="activeTool !== 'none' ? 'cursor-crosshair' : 'cursor-grab'"
+                class="relative overflow-hidden rounded-lg border border-border bg-muted"
+                :class="[
+                    canvasHeightClass,
+                    activeTool !== 'none' ? 'cursor-crosshair' : 'cursor-grab',
+                ]"
             >
                 <canvas
                     ref="canvasRef"
@@ -1576,7 +1562,8 @@ watch(() => props.scalePxPerMm, () => { drawOverlay() })
 
             <!-- Measurement list -->
             <div
-                class="flex max-h-[500px] flex-col gap-1 overflow-y-auto rounded-lg border border-border bg-muted/30 p-2"
+                class="flex flex-col gap-1 overflow-y-auto rounded-lg border border-border bg-muted/30 p-2"
+                :class="canvasHeightClass"
             >
                 <div
                     v-if="measurementSummaries.length === 0"
