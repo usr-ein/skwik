@@ -94,6 +94,36 @@ function relativeMaxDiff(a: Mat3, b: Mat3): number {
     return scale > 0 ? diff / scale : diff
 }
 
+/** Inverse of a 3×3 homography (row-major). Returns null if singular. */
+function invertMat3(h: Mat3): Mat3 | null {
+    const a = h[0]
+    const b = h[1]
+    const c = h[2]
+    const d = h[3]
+    const e = h[4]
+    const f = h[5]
+    const g = h[6]
+    const hh = h[7]
+    const i = h[8]
+    const det =
+        a * (e * i - f * hh) -
+        b * (d * i - f * g) +
+        c * (d * hh - e * g)
+    if (Math.abs(det) < 1e-20) return null
+    const invDet = 1 / det
+    return [
+        (e * i - f * hh) * invDet,
+        (c * hh - b * i) * invDet,
+        (b * f - c * e) * invDet,
+        (f * g - d * i) * invDet,
+        (a * i - c * g) * invDet,
+        (c * d - a * f) * invDet,
+        (d * hh - e * g) * invDet,
+        (b * g - a * hh) * invDet,
+        (a * e - b * d) * invDet,
+    ]
+}
+
 // ─── Geometric helpers ──────────────────────────────────────────────────────
 
 function dist(a: Point, b: Point): number {
@@ -647,19 +677,33 @@ function residualForEllipse(
     scale: number,
     isPrimary: boolean,
 ): RawReport {
-    // Pull the image ellipse back to world space via C = H^T E H
+    // E is the image-space ellipse conic; H maps image → output. The
+    // output-space conic we want to check for circularity is therefore
+    //     C = H^{-T} · E · H^{-1}
+    // (points q on C iff H^{-1}·q lands on E). Using H^T·E·H computes the
+    // wrong conic and produces meaningless diagnostic numbers.
     const E = ellipseMatrix(ellipse.center, ellipse.axisEndA, ellipse.axisEndB)
-    const HT = [
-        [H[0], H[3], H[6]],
-        [H[1], H[4], H[7]],
-        [H[2], H[5], H[8]],
+    const Hi = invertMat3(H)
+    const zeroReport: RawReport = {
+        label: ellipse.label,
+        type: "ellipse",
+        expectedMm: ellipse.diameterMm,
+        measuredMm: 0,
+        residuals: [0, 0, 0],
+        details: "(H singular, cannot compute)",
+    }
+    if (!Hi) return zeroReport
+    const HiT = [
+        [Hi[0], Hi[3], Hi[6]],
+        [Hi[1], Hi[4], Hi[7]],
+        [Hi[2], Hi[5], Hi[8]],
     ]
     const Hm = [
-        [H[0], H[1], H[2]],
-        [H[3], H[4], H[5]],
-        [H[6], H[7], H[8]],
+        [Hi[0], Hi[1], Hi[2]],
+        [Hi[3], Hi[4], Hi[5]],
+        [Hi[6], Hi[7], Hi[8]],
     ]
-    // C = HT · E · Hm
+    // C = HiT · E · Hm    (= H^{-T} E H^{-1})
     const EH: number[][] = [
         [0, 0, 0],
         [0, 0, 0],
@@ -683,7 +727,7 @@ function residualForEllipse(
         for (let j = 0; j < 3; j++) {
             let s = 0
             for (let k = 0; k < 3; k++) {
-                s += (HT[i]?.[k] ?? 0) * (EH[k]?.[j] ?? 0)
+                s += (HiT[i]?.[k] ?? 0) * (EH[k]?.[j] ?? 0)
             }
             ;(C[i] as number[])[j] = s
         }
