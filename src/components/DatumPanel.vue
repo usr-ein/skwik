@@ -2,8 +2,10 @@
 import { useAppStore } from "@/stores/app"
 import {
     RECT_PRESETS,
+    CIRCLE_PRESETS,
     createRectDatum,
     createLineDatum,
+    createEllipseDatum,
     getDatumColor,
 } from "@/lib/datums"
 import type { ConfidenceScore, Datum, RectDatum } from "@/types"
@@ -31,6 +33,10 @@ function nextLineIndex(): number {
     return store.datums.filter((d) => d.type === "line").length + 1
 }
 
+function nextEllipseIndex(): number {
+    return store.datums.filter((d) => d.type === "ellipse").length + 1
+}
+
 function addRect(presetLabel?: string) {
     const preset = presetLabel
         ? RECT_PRESETS.find((p) => p.label === presetLabel)
@@ -40,6 +46,15 @@ function addRect(presetLabel?: string) {
 
 function addLine() {
     store.addDatum(createLineDatum(imageCenter(), nextLineIndex()))
+}
+
+function addCircle(presetLabel?: string) {
+    const preset = presetLabel
+        ? CIRCLE_PRESETS.find((p) => p.label === presetLabel)
+        : undefined
+    store.addDatum(
+        createEllipseDatum(imageCenter(), nextEllipseIndex(), preset),
+    )
 }
 
 function updateField(datum: Datum, field: string, value: string | number) {
@@ -65,7 +80,16 @@ function formatDimensions(datum: Datum): string {
     if (datum.type === "rectangle") {
         return `${String(datum.widthMm)} \u00D7 ${String(datum.heightMm)} mm`
     }
-    return `${String(datum.lengthMm)} mm`
+    if (datum.type === "line") {
+        return `${String(datum.lengthMm)} mm`
+    }
+    return `⌀ ${String(datum.diameterMm)} mm`
+}
+
+function typeBadge(datum: Datum): string {
+    if (datum.type === "rectangle") return "Rect"
+    if (datum.type === "line") return "Line"
+    return "Circle"
 }
 </script>
 
@@ -77,14 +101,14 @@ function formatDimensions(datum: Datum): string {
                 <CardTitle class="text-sm">Add Datum</CardTitle>
             </CardHeader>
             <CardContent class="space-y-3">
-                <div class="grid grid-cols-2 gap-2">
+                <div class="grid grid-cols-3 gap-2">
                     <Button
                         variant="outline"
                         size="sm"
                         class="w-full"
                         @click="addRect()"
                     >
-                        + Rectangle
+                        + Rect
                     </Button>
                     <Button
                         variant="outline"
@@ -93,6 +117,14 @@ function formatDimensions(datum: Datum): string {
                         @click="addLine"
                     >
                         + Line
+                    </Button>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        class="w-full"
+                        @click="addCircle()"
+                    >
+                        + Circle
                     </Button>
                 </div>
                 <div class="flex flex-wrap gap-1.5">
@@ -105,6 +137,16 @@ function formatDimensions(datum: Datum): string {
                         @click="addRect(preset.label)"
                     >
                         {{ preset.label }}
+                    </Button>
+                    <Button
+                        v-for="preset in CIRCLE_PRESETS"
+                        :key="`circle-${preset.label}`"
+                        variant="secondary"
+                        size="sm"
+                        class="h-7 text-xs"
+                        @click="addCircle(preset.label)"
+                    >
+                        ⌀ {{ preset.label }}
                     </Button>
                 </div>
             </CardContent>
@@ -147,9 +189,7 @@ function formatDimensions(datum: Datum): string {
                                 :style="{ backgroundColor: getDatumColor(idx) }"
                             />
                             <Badge variant="outline" class="text-xs">
-                                {{
-                                    datum.type === "rectangle" ? "Rect" : "Line"
-                                }}
+                                {{ typeBadge(datum) }}
                             </Badge>
                             <span class="text-xs text-muted-foreground">{{
                                 formatDimensions(datum)
@@ -262,7 +302,7 @@ function formatDimensions(datum: Datum): string {
                             />
                         </div>
                     </div>
-                    <div v-else>
+                    <div v-else-if="datum.type === 'line'">
                         <Label class="text-xs">Length (mm)</Label>
                         <Input
                             :model-value="String(datum.lengthMm)"
@@ -272,6 +312,21 @@ function formatDimensions(datum: Datum): string {
                             @update:model-value="
                                 (v: string | number) =>
                                     updateField(datum, 'lengthMm', Number(v))
+                            "
+                            @click.stop
+                        />
+                    </div>
+                    <div v-else>
+                        <Label class="text-xs">Diameter (mm)</Label>
+                        <Input
+                            :model-value="String(datum.diameterMm)"
+                            type="number"
+                            min="1"
+                            step="0.01"
+                            class="mt-1 h-8 text-sm"
+                            @update:model-value="
+                                (v: string | number) =>
+                                    updateField(datum, 'diameterMm', Number(v))
                             "
                             @click.stop
                         />

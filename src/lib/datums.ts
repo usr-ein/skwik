@@ -1,12 +1,27 @@
 import { nanoid } from "nanoid"
-import type { LineDatum, Point, RectDatum, RectPreset } from "@/types"
+import type {
+    CirclePreset,
+    EllipseDatum,
+    LineDatum,
+    Point,
+    RectDatum,
+    RectPreset,
+} from "@/types"
 
 export const RECT_PRESETS: RectPreset[] = [
     { label: "A3", widthMm: 297, heightMm: 420 },
     { label: "A4", widthMm: 210, heightMm: 297 },
     { label: "A5", widthMm: 148, heightMm: 210 },
     { label: "A6", widthMm: 105, heightMm: 148 },
-    { label: "15\u00D710 cm", widthMm: 150, heightMm: 100 },
+    { label: "15×10 cm", widthMm: 150, heightMm: 100 },
+]
+
+export const CIRCLE_PRESETS: CirclePreset[] = [
+    { label: "€1", diameterMm: 23.25 },
+    { label: "€2", diameterMm: 25.75 },
+    { label: "US 25¢", diameterMm: 24.26 },
+    { label: "UK 1p", diameterMm: 20.3 },
+    { label: "CD", diameterMm: 120 },
 ]
 
 const DATUM_COLORS = [
@@ -71,5 +86,23 @@ export function createLineDatum(center: Point, index: number): LineDatum {
         lengthMm: 0,
         confidence: 3,
         label: `Line ${String(index)}`,
+    }
+}
+
+export function createEllipseDatum(
+    center: Point,
+    index: number,
+    preset?: CirclePreset,
+): EllipseDatum {
+    const spread = 80
+    return {
+        id: nanoid(),
+        type: "ellipse",
+        center: { x: center.x, y: center.y },
+        axisEndA: { x: center.x + spread, y: center.y },
+        axisEndB: { x: center.x, y: center.y + spread },
+        diameterMm: preset?.diameterMm ?? 0,
+        confidence: 3,
+        label: preset?.label ?? `Circle ${String(index)}`,
     }
 }

@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from "vue"
 import { useAppStore } from "@/stores/app"
 import { deskewImage, waitForOpenCV } from "@/lib/deskew"
-import type { RectDatum } from "@/types"
+import type { Datum } from "@/types"
 import { DEFAULT_SCALE_PX_PER_MM } from "@/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -59,39 +59,67 @@ watch(scaleInput, (v) => {
 
 const MAX_AUTO_SCALE_DIM = 8192
 
+/** Estimate the image-pixels-per-mm implied by a single datum. Picks the
+ *  best datum by type priority (rect > line > ellipse) and then confidence.
+ *  Returns null if no datum gives a usable scale. */
+function pickScaleRef(): { srcPxPerMm: number } | null {
+    const best = [...store.datums].sort((a, b) => {
+        const rank = (d: Datum) =>
+            d.type === "rectangle" ? 0 : d.type === "ellipse" ? 1 : 2
+        const r = rank(a) - rank(b)
+        if (r !== 0) return r
+        return b.confidence - a.confidence
+    })[0]
+    if (!best) return null
+    if (best.type === "rectangle") {
+        if (best.widthMm <= 0 || best.heightMm <= 0) return null
+        const c = best.corners
+        const srcW = Math.max(
+            Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y),
+            Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y),
+        )
+        const srcH = Math.max(
+            Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y),
+            Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y),
+        )
+        const sx = srcW / best.widthMm
+        const sy = srcH / best.heightMm
+        return { srcPxPerMm: Math.max(sx, sy) }
+    }
+    if (best.type === "line") {
+        if (best.lengthMm <= 0) return null
+        const L = Math.hypot(
+            best.endpoints[1].x - best.endpoints[0].x,
+            best.endpoints[1].y - best.endpoints[0].y,
+        )
+        return { srcPxPerMm: L / best.lengthMm }
+    }
+    if (best.diameterMm <= 0) return null
+    // Approximate the ellipse's "diameter" as max of the two semi-axis lengths × 2
+    const vA = Math.hypot(
+        best.axisEndA.x - best.center.x,
+        best.axisEndA.y - best.center.y,
+    )
+    const vB = Math.hypot(
+        best.axisEndB.x - best.center.x,
+        best.axisEndB.y - best.center.y,
+    )
+    return { srcPxPerMm: (2 * Math.max(vA, vB)) / best.diameterMm }
+}
+
 function computeAutoScale(): number {
     const img = store.loadedImage
-    const primary = store.datums.find(
-        (d): d is RectDatum => d.type === "rectangle",
-    )
-    if (!img || !primary) return DEFAULT_SCALE_PX_PER_MM
+    const ref = pickScaleRef()
+    if (!img || !ref || ref.srcPxPerMm <= 0) return DEFAULT_SCALE_PX_PER_MM
 
-    // Approximate source-pixel size of the datum
-    const c = primary.corners
-    const datumSrcW = Math.max(
-        Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y),
-        Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y),
-    )
-    const datumSrcH = Math.max(
-        Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y),
-        Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y),
-    )
-
-    // Scale that would make the datum the same pixel size as in source
-    const sx =
-        datumSrcW > 0 ? datumSrcW / primary.widthMm : 0
-    const sy =
-        datumSrcH > 0 ? datumSrcH / primary.heightMm : 0
-    let autoScale = Math.max(sx, sy)
+    let autoScale = ref.srcPxPerMm
 
     // Clamp so the full output doesn't exceed MAX_AUTO_SCALE_DIM
-    const estW = img.naturalWidth * autoScale / Math.max(datumSrcW / primary.widthMm, 0.001)
-    const estH = img.naturalHeight * autoScale / Math.max(datumSrcH / primary.heightMm, 0.001)
-    if (estW > MAX_AUTO_SCALE_DIM || estH > MAX_AUTO_SCALE_DIM) {
-        autoScale *= MAX_AUTO_SCALE_DIM / Math.max(estW, estH)
+    const estMax = Math.max(img.naturalWidth, img.naturalHeight)
+    if (estMax > MAX_AUTO_SCALE_DIM) {
+        autoScale *= MAX_AUTO_SCALE_DIM / estMax
     }
 
-    // Round to a clean number
     return Math.max(1, Math.round(autoScale * 10) / 10)
 }
 
@@ -134,39 +162,18 @@ const progressPercent = computed(() =>
 // Estimated output size — accounts for full warped image, not just datum
 const MAX_RGBA_MB = 512
 const estimatedOutput = computed(() => {
-    const primary = store.datums.find(
-        (d): d is RectDatum => d.type === "rectangle",
-    )
+    const ref = pickScaleRef()
     const img = store.loadedImage
-    if (!primary || !img || store.scalePxPerMm <= 0) return null
+    if (!ref || !img || store.scalePxPerMm <= 0 || ref.srcPxPerMm <= 0)
+        return null
 
-    // Datum dimensions in output pixels
-    const datumOutW = primary.widthMm * store.scalePxPerMm
-    const datumOutH = primary.heightMm * store.scalePxPerMm
+    // source-pixels-per-mm implied by the datum vs. requested output px/mm
+    const avgScale = store.scalePxPerMm / ref.srcPxPerMm
 
-    // Datum dimensions in source pixels (approximate from corner spread)
-    const c = primary.corners
-    const datumSrcW = Math.max(
-        Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y),
-        Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y),
-    )
-    const datumSrcH = Math.max(
-        Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y),
-        Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y),
-    )
-
-    // Scale factor from source to output (per-axis average)
-    const sx =
-        datumSrcW > 0 ? datumOutW / datumSrcW : store.scalePxPerMm
-    const sy =
-        datumSrcH > 0 ? datumOutH / datumSrcH : store.scalePxPerMm
-    const avgScale = (sx + sy) / 2
-
-    // Estimated full warped output = source image scaled
     const w = Math.round(img.naturalWidth * avgScale)
     const h = Math.round(img.naturalHeight * avgScale)
     const mb = (w * h * 4) / (1024 * 1024)
-    return { w, h, mb, datumW: Math.round(datumOutW), datumH: Math.round(datumOutH) }
+    return { w, h, mb }
 })
 
 const tooLarge = computed(
@@ -343,9 +350,6 @@ async function download() {
     URL.revokeObjectURL(url)
 }
 
-function hasRects(): boolean {
-    return store.datums.some((d) => d.type === "rectangle")
-}
 </script>
 
 <template>
@@ -451,7 +455,9 @@ function hasRects(): boolean {
                         <span class="ml-1 font-mono text-xs">{{
                             datum.type === "rectangle"
                                 ? `${datum.widthMm}\u00D7${datum.heightMm}mm`
-                                : `${datum.lengthMm}mm`
+                                : datum.type === "line"
+                                  ? `${datum.lengthMm}mm`
+                                  : `⌀${datum.diameterMm}mm`
                         }}</span>
                         <span class="ml-1 text-muted-foreground"
                             >conf {{ datum.confidence }}/5</span
@@ -459,11 +465,11 @@ function hasRects(): boolean {
                     </Badge>
                 </div>
                 <p
-                    v-if="!hasRects()"
+                    v-if="store.datums.length === 0"
                     class="mt-3 text-sm text-destructive"
                 >
-                    At least one rectangle datum is required for perspective
-                    correction.
+                    Add at least one datum (rectangle, line, or circle) to run
+                    the correction.
                 </p>
             </CardContent>
         </Card>
@@ -474,7 +480,7 @@ function hasRects(): boolean {
                 size="lg"
                 :disabled="
                     store.isProcessing ||
-                    !hasRects() ||
+                    store.datums.length === 0 ||
                     tooLarge ||
                     !scaleValid
                 "
@@ -585,7 +591,7 @@ function hasRects(): boolean {
                     </CardDescription>
                 </CardHeader>
                 <CardContent class="space-y-4">
-                    <!-- Axis corrections -->
+                    <!-- Solver summary -->
                     <div class="grid grid-cols-2 gap-4">
                         <div
                             class="rounded-md border border-border/50 p-3"
@@ -593,24 +599,19 @@ function hasRects(): boolean {
                             <p
                                 class="text-xs font-medium uppercase tracking-wide text-muted-foreground"
                             >
-                                X-axis correction
+                                Residual (RMS)
                             </p>
                             <p class="font-mono text-lg font-semibold">
                                 {{
-                                    (
-                                        store.deskewResult.diagnostics
-                                            .xCorrection.ratio * 100
-                                    ).toFixed(2)
+                                    store.deskewResult.diagnostics.finalRMSPercent.toFixed(
+                                        3,
+                                    )
                                 }}%
                             </p>
                             <p
                                 class="font-mono text-xs text-muted-foreground"
                             >
-                                w={{
-                                    store.deskewResult.diagnostics.xCorrection.totalWeight.toFixed(
-                                        1,
-                                    )
-                                }}
+                                across all datums
                             </p>
                         </div>
                         <div
@@ -619,24 +620,17 @@ function hasRects(): boolean {
                             <p
                                 class="text-xs font-medium uppercase tracking-wide text-muted-foreground"
                             >
-                                Y-axis correction
+                                Iterations
                             </p>
                             <p class="font-mono text-lg font-semibold">
                                 {{
-                                    (
-                                        store.deskewResult.diagnostics
-                                            .yCorrection.ratio * 100
-                                    ).toFixed(2)
-                                }}%
+                                    store.deskewResult.diagnostics.iterations
+                                }}
                             </p>
                             <p
                                 class="font-mono text-xs text-muted-foreground"
                             >
-                                w={{
-                                    store.deskewResult.diagnostics.yCorrection.totalWeight.toFixed(
-                                        1,
-                                    )
-                                }}
+                                outer alternating passes
                             </p>
                         </div>
                     </div>
@@ -661,7 +655,7 @@ function hasRects(): boolean {
                                 <TableHead class="text-right"
                                     >Error</TableHead
                                 >
-                                <TableHead>Axis</TableHead>
+                                <TableHead>Residual breakdown</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -681,24 +675,28 @@ function hasRects(): boolean {
                                     >
                                 </TableCell>
                                 <TableCell class="font-mono text-right">{{
-                                    report.expectedMm.toFixed(1)
+                                    report.expectedMm.toFixed(2)
                                 }}</TableCell>
                                 <TableCell class="font-mono text-right">{{
-                                    report.measuredMm.toFixed(1)
+                                    report.measuredMm.toFixed(2)
                                 }}</TableCell>
                                 <TableCell
                                     class="font-mono text-right"
                                     :class="
                                         report.errorPercent > 5
                                             ? 'text-destructive'
-                                            : ''
+                                            : report.errorPercent > 1
+                                              ? 'text-amber-500'
+                                              : ''
                                     "
                                 >
-                                    {{ report.errorPercent.toFixed(1) }}%
+                                    {{ report.errorPercent.toFixed(2) }}%
                                 </TableCell>
-                                <TableCell>{{
-                                    report.axisContribution
-                                }}</TableCell>
+                                <TableCell
+                                    class="font-mono text-xs text-muted-foreground"
+                                >
+                                    {{ report.details }}
+                                </TableCell>
                             </TableRow>
                         </TableBody>
                     </Table>
@@ -743,43 +741,49 @@ function hasRects(): boolean {
                             class="list-decimal space-y-2 text-sm leading-relaxed text-muted-foreground marker:font-semibold marker:text-foreground/60"
                         >
                             <li>
-                                The primary rectangle datum
-                                defines a
-                                <strong
-                                    class="text-foreground/80"
-                                    >homography</strong
-                                >
-                                &mdash; a 3&times;3 projective
-                                transform mapping the
-                                quadrilateral in the source
-                                image to a true rectangle at
-                                the specified real-world
-                                dimensions.
+                                The highest-confidence rectangle
+                                gives a closed-form warm start via
+                                <code
+                                    class="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground"
+                                    >cv::getPerspectiveTransform</code
+                                >, fixing the output
+                                orientation.
                             </li>
                             <li>
-                                Secondary datums (additional
-                                rectangles or line segments)
-                                provide
+                                Each datum is turned into
                                 <strong
                                     class="text-foreground/80"
-                                    >weighted correction
-                                    factors</strong
+                                    >shape-based point
+                                    correspondences</strong
                                 >
-                                for the X and Y axes. Each
-                                secondary datum's contribution
-                                is weighted by its confidence
-                                score, refining the scale in
-                                each axis independently.
+                                whose target positions are
+                                recomputed from the current
+                                homography on every outer pass:
+                                Procrustes-fit ideal rectangles,
+                                midpoint-preserving line rescales,
+                                and radially-snapped ellipse
+                                samples that force circles to stay
+                                circular.
                             </li>
                             <li>
-                                The final correction is applied
-                                as a single
+                                <code
+                                    class="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground"
+                                    >cv::findHomography</code
+                                >
+                                refines the homography by
+                                Levenberg&ndash;Marquardt on those
+                                correspondences; confidence drives
+                                per-datum replication. The loop
+                                stops once the homography stops
+                                moving.
+                            </li>
+                            <li>
+                                A single
                                 <code
                                     class="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground"
                                     >cv::warpPerspective</code
                                 >
-                                call via OpenCV WASM, producing
-                                the output image at the
+                                produces the output at the
                                 requested px/mm scale.
                             </li>
                         </ol>

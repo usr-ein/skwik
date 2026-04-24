@@ -33,7 +33,8 @@ const canvasHeight = computed(() =>
 const incompleteDatums = computed(() =>
     store.datums.filter((d) => {
         if (d.type === "rectangle") return d.widthMm <= 0 || d.heightMm <= 0
-        return d.lengthMm <= 0
+        if (d.type === "line") return d.lengthMm <= 0
+        return d.diameterMm <= 0
     }),
 )
 

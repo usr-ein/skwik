@@ -22,9 +22,26 @@ export interface LineDatum {
     label: string
 }
 
-export type Datum = RectDatum | LineDatum
+export interface EllipseDatum {
+    id: string
+    type: "ellipse"
+    /** Image-space ellipse as 3 free points: center + two conjugate
+     * semi-axis endpoints. axisEndA/axisEndB don't need to be perpendicular;
+     * together with center they give a full 5-DoF ellipse matrix. */
+    center: Point
+    axisEndA: Point
+    axisEndB: Point
+    /** Known real-world diameter of the circle being drawn. */
+    diameterMm: number
+    confidence: 1 | 2 | 3 | 4 | 5
+    label: string
+}
+
+export type Datum = RectDatum | LineDatum | EllipseDatum
 
 export type ConfidenceScore = 1 | 2 | 3 | 4 | 5
+
+export type DatumType = Datum["type"]
 
 export interface ExifData {
     make?: string
@@ -53,24 +70,26 @@ export interface DeskewInput {
     onProgress?: (step: number, total: number, label: string) => void
 }
 
-export interface AxisCorrection {
-    ratio: number
-    totalWeight: number
-}
-
 export interface DatumReport {
     label: string
-    type: "rectangle" | "line"
-    measuredMm: number
+    type: DatumType
+    /** Representative expected dimension in mm (widthMm / lengthMm / diameterMm). */
     expectedMm: number
+    /** Representative measured dimension in mm under the solved H. */
+    measuredMm: number
+    /** Overall residual magnitude expressed as a percentage. */
     errorPercent: number
-    axisContribution: "x" | "y" | "both"
+    /** Free-form breakdown for debugging (e.g. "iso 0.2%, skew 0.1%, dia 0.8%"). */
+    details: string
 }
 
 export interface DeskewDiagnostics {
+    /** Label of the rectangle used to fix the output gauge. */
     primaryDatum: string
-    xCorrection: AxisCorrection
-    yCorrection: AxisCorrection
+    /** Number of outer alternating-minimization iterations the solver ran. */
+    iterations: number
+    /** Final weighted RMS residual across all datums, as a percentage. */
+    finalRMSPercent: number
     perDatum: DatumReport[]
     outputWidthPx: number
     outputHeightPx: number
@@ -90,4 +109,9 @@ export interface RectPreset {
     label: string
     widthMm: number
     heightMm: number
+}
+
+export interface CirclePreset {
+    label: string
+    diameterMm: number
 }

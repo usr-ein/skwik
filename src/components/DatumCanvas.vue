@@ -50,23 +50,34 @@ function datumIndex(datum: Datum): number {
     return store.datums.findIndex((d) => d.id === datum.id)
 }
 
+function datumPoints(datum: Datum): Point[] {
+    if (datum.type === "rectangle") return datum.corners as unknown as Point[]
+    if (datum.type === "line") return datum.endpoints as unknown as Point[]
+    return [datum.center, datum.axisEndA, datum.axisEndB]
+}
+
 function getPointConfigs(datum: Datum, dIdx: number) {
     const color = getDatumColor(dIdx)
     const isSelected = store.selectedDatumId === datum.id
-    const points = datum.type === "rectangle" ? datum.corners : datum.endpoints
+    const points = datumPoints(datum)
     const baseRadius = isSelected ? 6 : 4
     const visualRadius = Math.max(
         baseRadius / scale.value,
-        baseRadius * 0.5
+        baseRadius * 0.5,
     )
 
     return points.map((pt, pIdx) => ({
+        // Ellipse center (index 0) is visually bigger + hollow to distinguish it
         x: pt.x,
         y: pt.y,
-        radius: visualRadius,
-        fill: color,
+        radius:
+            datum.type === "ellipse" && pIdx === 0
+                ? visualRadius * 1.4
+                : visualRadius,
+        fill: datum.type === "ellipse" && pIdx === 0 ? "transparent" : color,
         stroke: isSelected ? "#fff" : color,
-        strokeWidth: 1.5 / scale.value,
+        strokeWidth: (datum.type === "ellipse" && pIdx === 0 ? 2.5 : 1.5) /
+            scale.value,
         draggable: true,
         _datumId: datum.id,
         _pointIndex: pIdx,
@@ -74,9 +85,30 @@ function getPointConfigs(datum: Datum, dIdx: number) {
     }))
 }
 
+function ellipseCurvePoints(datum: Datum & { type: "ellipse" }): number[] {
+    const vAx = datum.axisEndA.x - datum.center.x
+    const vAy = datum.axisEndA.y - datum.center.y
+    const vBx = datum.axisEndB.x - datum.center.x
+    const vBy = datum.axisEndB.y - datum.center.y
+    const N = 72
+    const pts: number[] = []
+    for (let i = 0; i <= N; i++) {
+        const t = (2 * Math.PI * i) / N
+        const cs = Math.cos(t)
+        const sn = Math.sin(t)
+        pts.push(
+            datum.center.x + vAx * cs + vBx * sn,
+            datum.center.y + vAy * cs + vBy * sn,
+        )
+    }
+    return pts
+}
+
 function getLineConfigs(datum: Datum, dIdx: number) {
     const color = getDatumColor(dIdx)
     const isSelected = store.selectedDatumId === datum.id
+    const dash = isSelected ? [] : [8 / scale.value, 4 / scale.value]
+    const strokeWidth = (isSelected ? 3 : 2) / scale.value
 
     if (datum.type === "line") {
         return [
@@ -88,22 +120,55 @@ function getLineConfigs(datum: Datum, dIdx: number) {
                     datum.endpoints[1].y,
                 ],
                 stroke: color,
-                strokeWidth: (isSelected ? 3 : 2) / scale.value,
-                dash: isSelected ? [] : [8 / scale.value, 4 / scale.value],
+                strokeWidth,
+                dash,
             },
         ]
     }
 
-    // Rectangle: draw 4 edges
-    const c = datum.corners
-    const pts = [c[0], c[1], c[2], c[3], c[0]].flatMap((p) => [p.x, p.y])
+    if (datum.type === "rectangle") {
+        const c = datum.corners
+        const pts = [c[0], c[1], c[2], c[3], c[0]].flatMap((p) => [p.x, p.y])
+        return [
+            {
+                points: pts,
+                stroke: color,
+                strokeWidth,
+                closed: true,
+                dash,
+            },
+        ]
+    }
+
+    // Ellipse: sampled curve + two thin axis lines for visual reference
     return [
         {
-            points: pts,
+            points: ellipseCurvePoints(datum),
             stroke: color,
-            strokeWidth: (isSelected ? 3 : 2) / scale.value,
-            closed: true,
-            dash: isSelected ? [] : [8 / scale.value, 4 / scale.value],
+            strokeWidth,
+            dash,
+        },
+        {
+            points: [
+                datum.center.x,
+                datum.center.y,
+                datum.axisEndA.x,
+                datum.axisEndA.y,
+            ],
+            stroke: color,
+            strokeWidth: 1 / scale.value,
+            opacity: 0.5,
+        },
+        {
+            points: [
+                datum.center.x,
+                datum.center.y,
+                datum.axisEndB.x,
+                datum.axisEndB.y,
+            ],
+            stroke: color,
+            strokeWidth: 1 / scale.value,
+            opacity: 0.5,
         },
     ]
 }
@@ -117,12 +182,17 @@ function getLabelConfig(datum: Datum, dIdx: number) {
             x: (datum.corners[0].x + datum.corners[2].x) / 2,
             y: (datum.corners[0].y + datum.corners[2].y) / 2,
         }
-    } else {
+    } else if (datum.type === "line") {
         pos = {
             x: (datum.endpoints[0].x + datum.endpoints[1].x) / 2,
             y:
                 (datum.endpoints[0].y + datum.endpoints[1].y) / 2 -
                 20 / scale.value,
+        }
+    } else {
+        pos = {
+            x: datum.center.x,
+            y: datum.center.y - 20 / scale.value,
         }
     }
 
@@ -155,10 +225,29 @@ function onPointDragMove(e: {
         const newCorners = [...datum.corners] as [Point, Point, Point, Point]
         newCorners[_pointIndex] = newPos
         store.updateDatum(_datumId, { corners: newCorners })
-    } else {
+    } else if (datum.type === "line") {
         const newEndpoints = [...datum.endpoints] as [Point, Point]
         newEndpoints[_pointIndex] = newPos
         store.updateDatum(_datumId, { endpoints: newEndpoints })
+    } else if (_pointIndex === 0) {
+        // Ellipse center — translate all three handles together
+        const dx = newPos.x - datum.center.x
+        const dy = newPos.y - datum.center.y
+        store.updateDatum(_datumId, {
+            center: newPos,
+            axisEndA: {
+                x: datum.axisEndA.x + dx,
+                y: datum.axisEndA.y + dy,
+            },
+            axisEndB: {
+                x: datum.axisEndB.x + dx,
+                y: datum.axisEndB.y + dy,
+            },
+        })
+    } else if (_pointIndex === 1) {
+        store.updateDatum(_datumId, { axisEndA: newPos })
+    } else {
+        store.updateDatum(_datumId, { axisEndB: newPos })
     }
 }
 

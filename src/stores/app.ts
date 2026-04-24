@@ -29,7 +29,8 @@ export const useAppStore = defineStore("app", () => {
         if (!canProceedToStep3.value || datums.value.length === 0) return false
         return datums.value.every((d) => {
             if (d.type === "rectangle") return d.widthMm > 0 && d.heightMm > 0
-            return d.lengthMm > 0
+            if (d.type === "line") return d.lengthMm > 0
+            return d.diameterMm > 0
         })
     })
 
