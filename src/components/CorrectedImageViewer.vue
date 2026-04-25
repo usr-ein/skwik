@@ -1229,35 +1229,43 @@ function updateMeasurement(id: string, next: Measurement) {
     measurements.value[idx] = next
 }
 
-function pointerDown(screenX: number, screenY: number): "measurement" | "pan" {
+// Hit-test-first press handler, mirroring Konva's behaviour in the datum
+// editor: a click on an existing shape always wins over the stage's own
+// drag/pan, AND over any active placement tool. Returns "measurement" if
+// we picked up an existing measurement (caller suppresses the trailing
+// click so a placement tool doesn't commit a spurious point), "pan" if
+// the press should start a stage pan, and "placement" if the press
+// landed on empty space while a placement tool is active (caller does
+// nothing — the click event will commit the placement).
+function pointerDown(
+    screenX: number,
+    screenY: number,
+): "measurement" | "pan" | "placement" {
     const cursor = { x: screenX, y: screenY }
     const hit = hitTest(cursor)
-    if (!hit) {
-        // Empty-space click: deselect, fall through to pan behavior.
-        if (selectedId.value !== null) {
-            selectedId.value = null
-            drawOverlay()
+    if (hit) {
+        selectedId.value = hit.measurementId
+        const target = measurements.value.find((m) => m.id === hit.measurementId)
+        if (target) {
+            const mode: DragMode = hit.kind === "handle" ? "handle" : "move"
+            dragState = {
+                mode,
+                measurementId: target.id,
+                handleKey: hit.handleKey,
+                startImg: screenToImg(screenX, screenY),
+                startSnapshot: cloneMeasurement(target),
+            }
         }
-        return "pan"
-    }
-
-    selectedId.value = hit.measurementId
-    const target = measurements.value.find((m) => m.id === hit.measurementId)
-    if (!target) {
         drawOverlay()
         return "measurement"
     }
-
-    const mode: DragMode = hit.kind === "handle" ? "handle" : "move"
-    dragState = {
-        mode,
-        measurementId: target.id,
-        handleKey: hit.handleKey,
-        startImg: screenToImg(screenX, screenY),
-        startSnapshot: cloneMeasurement(target),
+    // Empty-space press.
+    if (activeTool.value !== "none") return "placement"
+    if (selectedId.value !== null) {
+        selectedId.value = null
+        drawOverlay()
     }
-    drawOverlay()
-    return "measurement"
+    return "pan"
 }
 
 function pointerMove(screenX: number, screenY: number): boolean {
@@ -1313,15 +1321,18 @@ function detachWindowDragListeners() {
     window.removeEventListener("mouseup", onWindowMouseUp)
 }
 
+// True between an existing-measurement-grab on mousedown and the trailing
+// click event the browser will fire. Suppresses the placement-tool click
+// so grabbing a prior measurement doesn't commit a spurious new point.
+let suppressNextClick = false
+
 function onMouseDown(e: MouseEvent) {
     const { x, y } = getCanvasXY(e)
-    if (activeTool.value !== "none") {
-        // Placement tools ignore mousedown; they commit on click so a user
-        // can drag-scroll accidentally without placing a spurious point.
-        return
-    }
+    suppressNextClick = false
     const outcome = pointerDown(x, y)
-    if (outcome === "pan") {
+    if (outcome === "measurement") {
+        suppressNextClick = true
+    } else if (outcome === "pan") {
         isPanning = true
         panStart = { x: e.clientX - viewOffsetX.value, y: e.clientY - viewOffsetY.value }
     }
@@ -1377,10 +1388,13 @@ function onMouseLeave() {
 }
 
 function onClick(e: MouseEvent) {
+    if (suppressNextClick) {
+        // Press picked up an existing measurement — the trailing click
+        // is part of that gesture, not a placement.
+        suppressNextClick = false
+        return
+    }
     if (activeTool.value === "none") return
-    // Guard against the click event that always follows a mousedown: if the
-    // user panned or dragged, that wasn't a placement click. Here we have no
-    // dragState at click-time because placements don't start one.
     const { x, y } = getCanvasXY(e)
     const imgPt = screenToImg(x, y)
     handlePlacementClick(imgPt)
@@ -1402,12 +1416,15 @@ function onTouchStart(e: TouchEvent) {
         isPanning = false
     } else if (e.touches.length === 1 && t0) {
         const { x, y } = getCanvasXY(t0)
-        if (activeTool.value !== "none") {
-            placementCursor.value = screenToImg(x, y)
-            return
-        }
+        // Always hit-test first so a tap on an existing handle reshapes
+        // it even when a placement tool is active.
+        suppressNextClick = false
         const outcome = pointerDown(x, y)
-        if (outcome === "pan") {
+        if (outcome === "measurement") {
+            suppressNextClick = true
+        } else if (outcome === "placement") {
+            placementCursor.value = screenToImg(x, y)
+        } else if (outcome === "pan") {
             isPanning = true
             panStart = {
                 x: t0.clientX - viewOffsetX.value,
