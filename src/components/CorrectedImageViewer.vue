@@ -91,7 +91,11 @@ let isPanning = false
 let panStart = { x: 0, y: 0 }
 let lastPinchDist = 0
 
-// Drag state for moving/reshaping committed measurements.
+// Drag state for moving/reshaping committed measurements. We don't gate
+// drag-start on a movement threshold — handles begin tracking the cursor
+// on the very first move event so positioning feels precise (matches
+// Konva's behaviour in the datum editor). A pure click without movement
+// never enters pointerMove, so selection on its own remains drift-free.
 type DragMode = "none" | "move" | "handle"
 interface DragState {
     mode: DragMode
@@ -102,14 +106,8 @@ interface DragState {
     startImg: Point
     // Snapshot of the measurement at drag start, for delta-based updates.
     startSnapshot: Measurement
-    // Did this pointer down actually move? Used to distinguish click vs drag.
-    moved: boolean
 }
 let dragState: DragState | null = null
-// Pixel threshold in screen space before a press becomes a drag. Small enough
-// that intentional drags feel responsive; large enough that a shaky click
-// still registers as a click.
-const DRAG_THRESHOLD_PX = 3
 
 function loadImg() {
     const image = new Image()
@@ -1257,7 +1255,6 @@ function pointerDown(screenX: number, screenY: number): "measurement" | "pan" {
         handleKey: hit.handleKey,
         startImg: screenToImg(screenX, screenY),
         startSnapshot: cloneMeasurement(target),
-        moved: false,
     }
     drawOverlay()
     return "measurement"
@@ -1268,14 +1265,6 @@ function pointerMove(screenX: number, screenY: number): boolean {
     const nowImg = screenToImg(screenX, screenY)
     const dxImg = nowImg.x - dragState.startImg.x
     const dyImg = nowImg.y - dragState.startImg.y
-    if (!dragState.moved) {
-        // Convert image-space delta back to screen-space via viewScale; easier
-        // than tracking the original screen cursor separately.
-        const screenDx = dxImg * viewScale.value
-        const screenDy = dyImg * viewScale.value
-        if (Math.hypot(screenDx, screenDy) < DRAG_THRESHOLD_PX) return true
-        dragState.moved = true
-    }
     const next = applyDrag(
         dragState.startSnapshot,
         dragState.mode,
