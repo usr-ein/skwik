@@ -46,6 +46,10 @@ type ToolMode = "none" | "line" | "rectangle" | "ellipse" | "circle" | "angle"
 const activeTool = ref<ToolMode>("none")
 const showGrid = ref(false)
 const gridSpacingMm = ref(10)
+// When on, line/angle placements and endpoint drags snap their direction to
+// the nearest 45° (0/45/90/135…) relative to the fixed endpoint or angle
+// vertex. Length is preserved; only direction is constrained.
+const snapToAngle = ref(false)
 
 // Measurement types live in `@/types/measurements` so the cache module and
 // other consumers can share them. Geometry is in image space so it stays
@@ -193,6 +197,21 @@ function drawOverlay() {
     const selected = measurements.value.find((m) => m.id === selectedId.value)
     if (selected) drawMeasurement(ctx, selected, true, rt)
 
+    // Labels go in a second pass: collision-resolve all positions across
+    // the full set, then paint. Resolving after geometries means labels
+    // never get hidden by lines drawn after them, and one shared resolver
+    // keeps unselected and selected labels from overlapping each other.
+    const labelPositions = resolveLabelPositions(ctx, measurements.value, rt)
+    for (const m of measurements.value) {
+        if (m.id === selectedId.value) continue
+        const pos = labelPositions.get(m.id)
+        if (pos) drawLabelAt(ctx, m, false, rt, pos)
+    }
+    if (selected) {
+        const pos = labelPositions.get(selected.id)
+        if (pos) drawLabelAt(ctx, selected, true, rt, pos)
+    }
+
     // Placement preview overlaying everything, in the active tool's color
     // slot (= next palette slot the new measurement will claim).
     if (activeTool.value !== "none" && placementPoints.value.length > 0) {
@@ -313,6 +332,24 @@ function screenToImg(sx: number, sy: number): Point {
     return {
         x: (sx - viewOffsetX.value) / viewScale.value,
         y: (sy - viewOffsetY.value) / viewScale.value,
+    }
+}
+
+// If `snapToAngle` is on, rotate `to` around `from` to the nearest 45°
+// multiple while preserving |to - from|. Used by line + angle placement
+// and endpoint dragging so the user can lay down clean orthogonal /
+// diagonal references without aiming pixel-perfect with the cursor.
+function maybeSnap45(from: Point, to: Point): Point {
+    if (!snapToAngle.value) return to
+    const dx = to.x - from.x
+    const dy = to.y - from.y
+    const r = Math.hypot(dx, dy)
+    if (r < 1e-6) return to
+    const STEP = Math.PI / 4
+    const snapped = Math.round(Math.atan2(dy, dx) / STEP) * STEP
+    return {
+        x: from.x + r * Math.cos(snapped),
+        y: from.y + r * Math.sin(snapped),
     }
 }
 
@@ -520,7 +557,6 @@ function drawMeasurement(
     }
 
     ctx.globalAlpha = 1.0
-    drawLabel(ctx, m, baseColor, isSelected, rt)
     ctx.restore()
 }
 
@@ -779,16 +815,125 @@ function drawHandle(
     ctx.restore()
 }
 
-function drawLabel(
+// Resolved label position for one measurement after collision avoidance.
+// `pos` is the rect to draw at, `anchor` is the geometry-space anchor in
+// canvas coords (used to draw a leader line back when the label is shifted),
+// and `shifted` flags whether collision-resolution moved the label far
+// enough to warrant a leader line.
+interface LabelPos {
+    x: number
+    y: number
+    w: number
+    h: number
+    textX: number
+    textY: number
+    fontPx: number
+    anchor: Point
+    shifted: boolean
+}
+
+// AABB overlap with optional gap padding so labels don't sit flush against
+// each other.
+function rectsOverlap(
+    a: { x: number; y: number; w: number; h: number },
+    b: { x: number; y: number; w: number; h: number },
+    gap: number,
+): boolean {
+    return !(
+        a.x + a.w + gap <= b.x ||
+        b.x + b.w + gap <= a.x ||
+        a.y + a.h + gap <= b.y ||
+        b.y + b.h + gap <= a.y
+    )
+}
+
+// Greedy collision avoidance: process labels top-to-bottom by anchor Y,
+// place each at its desired position, and if it overlaps any already-placed
+// label, push it down past the offender. Predictable, fast for typical
+// measurement counts, and keeps every label still horizontally aligned with
+// its anchor (we only shift in Y). Labels that move significantly get a
+// leader line back to their anchor in `drawLabelAt`.
+function resolveLabelPositions(
+    ctx: CanvasRenderingContext2D,
+    list: Measurement[],
+    rt: RenderCtx,
+): Map<string, LabelPos> {
+    const gap = 4 * rt.strokeMul
+    const items = list.map((m) => {
+        const anchor = imgToCtx(labelAnchor(m), rt)
+        const rect = labelRect(ctx, m, rt)
+        return { id: m.id, anchor, rect, originalY: rect.y }
+    })
+    items.sort((a, b) => a.anchor.y - b.anchor.y)
+
+    const placed: typeof items = []
+    for (const it of items) {
+        let safety = 50
+        while (safety-- > 0) {
+            let collided = false
+            for (const p of placed) {
+                if (rectsOverlap(it.rect, p.rect, gap)) {
+                    const shift = p.rect.y + p.rect.h + gap - it.rect.y
+                    it.rect = {
+                        ...it.rect,
+                        y: it.rect.y + shift,
+                        textY: it.rect.textY + shift,
+                    }
+                    collided = true
+                    break
+                }
+            }
+            if (!collided) break
+        }
+        placed.push(it)
+    }
+
+    const out = new Map<string, LabelPos>()
+    const shiftThreshold = 4 * rt.strokeMul
+    for (const it of placed) {
+        out.set(it.id, {
+            x: it.rect.x,
+            y: it.rect.y,
+            w: it.rect.w,
+            h: it.rect.h,
+            textX: it.rect.textX,
+            textY: it.rect.textY,
+            fontPx: it.rect.fontPx,
+            anchor: it.anchor,
+            shifted: Math.abs(it.rect.y - it.originalY) > shiftThreshold,
+        })
+    }
+    return out
+}
+
+function drawLabelAt(
     ctx: CanvasRenderingContext2D,
     m: Measurement,
-    baseColor: string,
     isSelected: boolean,
     rt: RenderCtx,
+    pos: LabelPos,
 ) {
-    const rect = labelRect(ctx, m, rt)
+    const baseColor = getDatumColor(m.colorIndex)
     const decorate = rt.drawSelectionDecorations
-    const labelAlpha = decorate ? (isSelected ? 1.0 : 0.5) : 1.0
+    const labelAlpha = decorate ? (isSelected ? 1.0 : 0.7) : 1.0
+
+    // Leader line back to the geometry anchor when collision resolution
+    // dragged the label away from its preferred position. Drawn first so
+    // the label box paints over the line where they meet.
+    if (pos.shifted) {
+        ctx.save()
+        ctx.globalAlpha = labelAlpha * 0.6
+        ctx.strokeStyle = baseColor
+        ctx.lineWidth = 1 * rt.strokeMul
+        ctx.setLineDash([3 * rt.strokeMul, 2 * rt.strokeMul])
+        ctx.beginPath()
+        ctx.moveTo(pos.anchor.x, pos.anchor.y)
+        ctx.lineTo(pos.x + pos.w / 2, pos.y + pos.h / 2)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.restore()
+    }
+
     ctx.save()
     ctx.globalAlpha = labelAlpha
     // In export mode every label uses the measurement's own colour for the
@@ -799,18 +944,28 @@ function drawLabel(
             ? baseColor
             : "rgba(0, 0, 0, 0.75)"
         : baseColor
-    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 4 * rt.strokeMul)
+    roundRect(ctx, pos.x, pos.y, pos.w, pos.h, 4 * rt.strokeMul)
     ctx.fill()
-    if (decorate && isSelected) {
-        ctx.strokeStyle = "#ffffff"
-        ctx.lineWidth = 1 * rt.strokeMul
+    // Colored border on the dark unselected pill ties a label to its
+    // geometry without relying on selection state — without this, every
+    // unselected label looked identical. Selected labels use a white border
+    // for the highlight ring; in export-mode pills are filled with baseColor
+    // and don't need a border.
+    if (decorate) {
+        if (isSelected) {
+            ctx.strokeStyle = "#ffffff"
+            ctx.lineWidth = 1 * rt.strokeMul
+        } else {
+            ctx.strokeStyle = baseColor
+            ctx.lineWidth = 1.5 * rt.strokeMul
+        }
         ctx.stroke()
     }
-    ctx.font = `bold ${String(rect.fontPx)}px monospace`
+    ctx.font = `bold ${String(pos.fontPx)}px monospace`
     ctx.fillStyle = "#ffffff"
     ctx.textAlign = "center"
     ctx.textBaseline = "middle"
-    ctx.fillText(measurementLabel(m), rect.textX, rect.textY)
+    ctx.fillText(measurementLabel(m), pos.textX, pos.textY)
     ctx.textAlign = "start"
     ctx.textBaseline = "alphabetic"
     ctx.restore()
@@ -850,8 +1005,20 @@ function drawPlacementPreview(ctx: CanvasRenderingContext2D) {
     ctx.lineWidth = 2
     ctx.setLineDash([4, 3])
 
+    // Snap the cursor for tools whose direction is meaningful: line snaps
+    // relative to the first endpoint, angle relative to the vertex (pts[0]).
+    // Rect and ellipse don't snap — rect is axis-aligned by construction
+    // and the ellipse's "direction" is just an axis label, not orientation
+    // the user typically cares to lock to 45°.
+    let effectiveCursor = cursor
+    if (cursor && pts.length >= 1 && pts[0]) {
+        if (activeTool.value === "line" || activeTool.value === "angle") {
+            effectiveCursor = maybeSnap45(pts[0], cursor)
+        }
+    }
+
     const sPts = pts.map(imgToScreen)
-    const sCursor = cursor ? imgToScreen(cursor) : null
+    const sCursor = effectiveCursor ? imgToScreen(effectiveCursor) : null
 
     if (activeTool.value === "line" && sPts.length >= 1 && sPts[0] && sCursor) {
         ctx.beginPath()
@@ -1232,7 +1399,17 @@ function commitPlacement() {
 
 function handlePlacementClick(imgPt: Point) {
     if (activeTool.value === "none") return
-    placementPoints.value.push(imgPt)
+    // Snap the click before storing so the preview, the committed
+    // measurement, and any subsequent point all see the same coordinate.
+    // Mirrors `drawPlacementPreview`'s snap rules.
+    const pts = placementPoints.value
+    let pt = imgPt
+    if (pts.length >= 1 && pts[0]) {
+        if (activeTool.value === "line" || activeTool.value === "angle") {
+            pt = maybeSnap45(pts[0], imgPt)
+        }
+    }
+    placementPoints.value.push(pt)
     const needed =
         activeTool.value === "line" ||
         activeTool.value === "rectangle" ||
@@ -1369,8 +1546,14 @@ function applyDrag(
     }
     if (mode === "handle" && handleKey) {
         if (original.type === "line") {
-            if (handleKey === "a") return { ...original, a: { x: original.a.x + dx, y: original.a.y + dy } }
-            if (handleKey === "b") return { ...original, b: { x: original.b.x + dx, y: original.b.y + dy } }
+            if (handleKey === "a") {
+                const raw = { x: original.a.x + dx, y: original.a.y + dy }
+                return { ...original, a: maybeSnap45(original.b, raw) }
+            }
+            if (handleKey === "b") {
+                const raw = { x: original.b.x + dx, y: original.b.y + dy }
+                return { ...original, b: maybeSnap45(original.a, raw) }
+            }
         } else if (original.type === "rectangle") {
             // Constrain to an axis-aligned rectangle: the dragged corner
             // follows the cursor, the diagonally-opposite corner stays put,
@@ -1456,10 +1639,12 @@ function applyDrag(
                 }
             }
             if (handleKey === "armA") {
-                return { ...original, armA: { x: original.armA.x + dx, y: original.armA.y + dy } }
+                const raw = { x: original.armA.x + dx, y: original.armA.y + dy }
+                return { ...original, armA: maybeSnap45(original.vertex, raw) }
             }
             if (handleKey === "armB") {
-                return { ...original, armB: { x: original.armB.x + dx, y: original.armB.y + dy } }
+                const raw = { x: original.armB.x + dx, y: original.armB.y + dy }
+                return { ...original, armB: maybeSnap45(original.vertex, raw) }
             }
         }
     }
@@ -1487,9 +1672,22 @@ function pointerDown(
     const cursor = { x: screenX, y: screenY }
     const hit = hitTest(cursor)
     if (hit) {
-        selectedId.value = hit.measurementId
         const target = measurements.value.find((m) => m.id === hit.measurementId)
-        if (target) {
+        // Circles are exclusively manipulated via their two handles —
+        // center (which translates the whole circle while keeping its
+        // radius) and edge (resize). Body and label hits don't drag.
+        const isCircleBodyHit =
+            target?.type === "circle" && hit.kind !== "handle"
+        // When a placement tool is active and the hit is on a circle's
+        // body, fall through to placement entirely — don't select, don't
+        // suppress the click. This lets the user draw a new measurement
+        // on top of an existing circle. Handles still claim the press
+        // so the circle can be reshaped from within an active tool too.
+        if (isCircleBodyHit && activeTool.value !== "none") {
+            return "placement"
+        }
+        selectedId.value = hit.measurementId
+        if (target && !isCircleBodyHit) {
             const mode: DragMode = hit.kind === "handle" ? "handle" : "move"
             dragState = {
                 mode,
@@ -1983,9 +2181,20 @@ function exportWithMeasurements(opts: {
         scalePxPerMmForBar = props.scalePxPerMm * viewScale.value
     }
 
-    // Draw every measurement, no selection distinction.
+    // Draw every measurement, no selection distinction. Geometries first,
+    // then collision-resolved labels — same two-pass order the live
+    // overlay uses, so labels stay legible when shapes are dense.
     for (const m of measurements.value) {
         drawMeasurement(outCtx, m, false, renderCtx)
+    }
+    const exportLabelPositions = resolveLabelPositions(
+        outCtx,
+        measurements.value,
+        renderCtx,
+    )
+    for (const m of measurements.value) {
+        const pos = exportLabelPositions.get(m.id)
+        if (pos) drawLabelAt(outCtx, m, false, renderCtx, pos)
     }
 
     if (opts.includeScaleBar) {
@@ -2207,6 +2416,18 @@ watch(
                 class="font-mono text-xs text-muted-foreground"
                 >mm</span
             >
+
+            <label
+                class="inline-flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"
+                title="Snap line + angle directions to multiples of 45°"
+            >
+                <input
+                    v-model="snapToAngle"
+                    type="checkbox"
+                    class="accent-primary"
+                />
+                Snap 45°
+            </label>
         </div>
 
         <!-- Placement hint -->
