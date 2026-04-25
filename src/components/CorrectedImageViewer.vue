@@ -32,7 +32,7 @@ const viewOffsetX = ref(0)
 const viewOffsetY = ref(0)
 
 // Tool state
-type ToolMode = "none" | "line" | "ellipse" | "angle"
+type ToolMode = "none" | "line" | "rectangle" | "ellipse" | "angle"
 const activeTool = ref<ToolMode>("none")
 const showGrid = ref(false)
 const gridSpacingMm = ref(10)
@@ -48,6 +48,14 @@ interface LineMeasurement extends BaseMeasurement {
     a: Point
     b: Point
 }
+// Corner ordering [TL, TR, BR, BL] mirrors the RectDatum convention from
+// src/types/index.ts. Indices stay stable across drags even if the user
+// crosses corners — visual + hit-tests don't depend on TL actually being
+// top-left after reshape, matching the datum editor's behaviour.
+interface RectMeasurement extends BaseMeasurement {
+    type: "rectangle"
+    corners: [Point, Point, Point, Point]
+}
 interface EllipseMeasurement extends BaseMeasurement {
     type: "ellipse"
     center: Point
@@ -60,7 +68,11 @@ interface AngleMeasurement extends BaseMeasurement {
     armA: Point
     armB: Point
 }
-type Measurement = LineMeasurement | EllipseMeasurement | AngleMeasurement
+type Measurement =
+    | LineMeasurement
+    | RectMeasurement
+    | EllipseMeasurement
+    | AngleMeasurement
 
 const measurements = ref<Measurement[]>([])
 const selectedId = ref<string | null>(null)
@@ -293,6 +305,35 @@ function angleDegrees(m: AngleMeasurement): number {
     return (rad * 180) / Math.PI
 }
 
+// Width = mean of TL→TR and BL→BR (the two "horizontal" sides under the
+// stored ordering). Height = mean of TL→BL and TR→BR. This averages out
+// minor non-rectangular skew the user may introduce while reshaping.
+function rectDimensionsMm(m: RectMeasurement): { widthMm: number; heightMm: number } {
+    const [tl, tr, br, bl] = m.corners
+    const wTop = Math.hypot(tr.x - tl.x, tr.y - tl.y)
+    const wBot = Math.hypot(br.x - bl.x, br.y - bl.y)
+    const hLeft = Math.hypot(bl.x - tl.x, bl.y - tl.y)
+    const hRight = Math.hypot(br.x - tr.x, br.y - tr.y)
+    return {
+        widthMm: (wTop + wBot) / 2 / props.scalePxPerMm,
+        heightMm: (hLeft + hRight) / 2 / props.scalePxPerMm,
+    }
+}
+
+// Shoelace area of the quadrilateral, sign-stripped — handles skewed/
+// reshaped rectangles correctly. Crossed quads will give a smaller area
+// (common shoelace behaviour); we accept that since we don't auto-reorder.
+function rectAreaMm2(m: RectMeasurement): number {
+    const [p0, p1, p2, p3] = m.corners
+    const cross =
+        p0.x * p1.y - p1.x * p0.y +
+        p1.x * p2.y - p2.x * p1.y +
+        p2.x * p3.y - p3.x * p2.y +
+        p3.x * p0.y - p0.x * p3.y
+    const areaPx2 = Math.abs(cross) / 2
+    return areaPx2 / (props.scalePxPerMm * props.scalePxPerMm)
+}
+
 function formatMm(v: number): string {
     return v >= 10 ? v.toFixed(1) : v.toFixed(2)
 }
@@ -303,9 +344,20 @@ function formatArea(v: number): string {
     return v.toFixed(2)
 }
 
+// Spec for rectangle area readout: 0 decimals when ≥ 100 mm², else 1.
+function formatRectArea(v: number): string {
+    if (v >= 100) return v.toFixed(0)
+    return v.toFixed(1)
+}
+
 function measurementLabel(m: Measurement): string {
     if (m.type === "line") {
         return `${formatMm(lineLengthMm(m))} mm`
+    }
+    if (m.type === "rectangle") {
+        const { widthMm, heightMm } = rectDimensionsMm(m)
+        const area = rectAreaMm2(m)
+        return `${widthMm.toFixed(1)} × ${heightMm.toFixed(1)} mm · ${formatRectArea(area)} mm²`
     }
     if (m.type === "ellipse") {
         const { semiMajor, semiMinor } = ellipseAxesMm(m)
@@ -317,8 +369,19 @@ function measurementLabel(m: Measurement): string {
 
 function measurementTypeLabel(m: Measurement): string {
     if (m.type === "line") return "Line"
+    if (m.type === "rectangle") return "Rect"
     if (m.type === "ellipse") return "Ellipse"
     return "Angle"
+}
+
+// Side-panel summary uses the shorter "w×h mm" without the area suffix per
+// the spec — a separate format from the on-canvas label.
+function measurementSummaryValue(m: Measurement): string {
+    if (m.type === "rectangle") {
+        const { widthMm, heightMm } = rectDimensionsMm(m)
+        return `${widthMm.toFixed(1)}×${heightMm.toFixed(1)} mm`
+    }
+    return measurementLabel(m)
 }
 
 // Anchor point in image space where we place the label. Chosen per type so
@@ -326,6 +389,13 @@ function measurementTypeLabel(m: Measurement): string {
 function labelAnchor(m: Measurement): Point {
     if (m.type === "line") {
         return { x: (m.a.x + m.b.x) / 2, y: (m.a.y + m.b.y) / 2 }
+    }
+    if (m.type === "rectangle") {
+        const [p0, p1, p2, p3] = m.corners
+        return {
+            x: (p0.x + p1.x + p2.x + p3.x) / 4,
+            y: (p0.y + p1.y + p2.y + p3.y) / 4,
+        }
     }
     if (m.type === "ellipse") {
         return m.center
@@ -370,6 +440,8 @@ function drawMeasurement(
 
     if (m.type === "line") {
         drawLineGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
+    } else if (m.type === "rectangle") {
+        drawRectGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
     } else if (m.type === "ellipse") {
         drawEllipseGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
     } else {
@@ -401,6 +473,35 @@ function drawLineGeometry(
     ctx.setLineDash([])
     drawHandle(ctx, sa, handleColor, isSelected)
     drawHandle(ctx, sb, handleColor, isSelected)
+}
+
+function drawRectGeometry(
+    ctx: CanvasRenderingContext2D,
+    m: RectMeasurement,
+    strokeColor: string,
+    handleColor: string,
+    lineWidth: number,
+    isSelected: boolean,
+) {
+    const screenCorners = m.corners.map(imgToScreen)
+    ctx.beginPath()
+    for (let i = 0; i < screenCorners.length; i++) {
+        const p = screenCorners[i]
+        if (!p) continue
+        if (i === 0) ctx.moveTo(p.x, p.y)
+        else ctx.lineTo(p.x, p.y)
+    }
+    ctx.closePath()
+    ctx.strokeStyle = strokeColor
+    ctx.lineWidth = lineWidth
+    ctx.setLineDash(isSelected ? [] : [6, 3])
+    ctx.stroke()
+    ctx.setLineDash([])
+    // Don't fill the interior — keeps what's underneath visible, matching
+    // the line/ellipse/angle visual style.
+    for (const p of screenCorners) {
+        drawHandle(ctx, p, handleColor, isSelected)
+    }
 }
 
 function drawEllipseGeometry(
@@ -612,6 +713,12 @@ function drawPlacementPreview(ctx: CanvasRenderingContext2D) {
         ctx.moveTo(sPts[0].x, sPts[0].y)
         ctx.lineTo(sCursor.x, sCursor.y)
         ctx.stroke()
+    } else if (activeTool.value === "rectangle" && sPts.length >= 1 && sPts[0] && sCursor) {
+        const a = sPts[0]
+        const b = sCursor
+        ctx.beginPath()
+        ctx.rect(a.x, a.y, b.x - a.x, b.y - a.y)
+        ctx.stroke()
     } else if (activeTool.value === "ellipse" && sPts.length >= 1 && sPts[0]) {
         const center = sPts[0]
         const endA = sPts[1] ?? sCursor
@@ -700,6 +807,24 @@ function pointToSegmentDistance(
     return Math.hypot(p.x - qx, p.y - qy)
 }
 
+// Standard ray-cast point-in-polygon. Works for any simple quadrilateral
+// (including reshaped non-rect cases) and gracefully degrades to a small
+// or zero region for crossed quads — which is what we want, since a
+// "crossed" rectangle is effectively user error.
+function pointInPolygon(p: Point, poly: Point[]): boolean {
+    let inside = false
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i++) {
+        const pi = poly[i]
+        const pj = poly[j]
+        if (!pi || !pj) continue
+        const intersect =
+            pi.y > p.y !== pj.y > p.y &&
+            p.x < ((pj.x - pi.x) * (p.y - pi.y)) / (pj.y - pi.y) + pi.x
+        if (intersect) inside = !inside
+    }
+    return inside
+}
+
 // Returns the min screen-space distance from cursor to the ellipse curve.
 // Sampled parametrically; 96 samples is overkill for hit-testing but cheap.
 function ellipseCurveDistance(
@@ -741,6 +866,14 @@ function getHandlePositions(m: Measurement): { key: string; pt: Point }[] {
         return [
             { key: "a", pt: m.a },
             { key: "b", pt: m.b },
+        ]
+    }
+    if (m.type === "rectangle") {
+        return [
+            { key: "c0", pt: m.corners[0] },
+            { key: "c1", pt: m.corners[1] },
+            { key: "c2", pt: m.corners[2] },
+            { key: "c3", pt: m.corners[3] },
         ]
     }
     if (m.type === "ellipse") {
@@ -803,6 +936,23 @@ function hitTest(cursorScreen: Point): HitResult | null {
             if (pointToSegmentDistance(cursorScreen, sa, sb) <= LINE_HIT_PX) {
                 return { measurementId: m.id, kind: "geometry", handleKey: null }
             }
+        } else if (m.type === "rectangle") {
+            const sc = m.corners.map(imgToScreen)
+            // Edge-near test for thin grabs along the border.
+            let edgeHit = false
+            for (let i = 0; i < 4; i++) {
+                const a = sc[i]
+                const b = sc[(i + 1) % 4]
+                if (a && b && pointToSegmentDistance(cursorScreen, a, b) <= LINE_HIT_PX) {
+                    edgeHit = true
+                    break
+                }
+            }
+            // Interior-fill test so a big rect is grabbable from anywhere
+            // inside, not just along the 6px edge band.
+            if (edgeHit || pointInPolygon(cursorScreen, sc)) {
+                return { measurementId: m.id, kind: "geometry", handleKey: null }
+            }
         } else if (m.type === "ellipse") {
             if (ellipseCurveDistance(cursorScreen, m) <= ELLIPSE_HIT_PX) {
                 return { measurementId: m.id, kind: "geometry", handleKey: null }
@@ -834,6 +984,28 @@ function commitPlacement() {
             colorIndex: colorCounter,
             a,
             b,
+        })
+        colorCounter += 1
+        selectedId.value = id
+        placementPoints.value = []
+    } else if (activeTool.value === "rectangle" && pts.length === 2) {
+        const [p1, p2] = pts as [Point, Point]
+        // Normalise so corners are TL/TR/BR/BL regardless of click order.
+        const minX = Math.min(p1.x, p2.x)
+        const maxX = Math.max(p1.x, p2.x)
+        const minY = Math.min(p1.y, p2.y)
+        const maxY = Math.max(p1.y, p2.y)
+        const id = nanoid()
+        measurements.value.push({
+            id,
+            type: "rectangle",
+            colorIndex: colorCounter,
+            corners: [
+                { x: minX, y: minY },
+                { x: maxX, y: minY },
+                { x: maxX, y: maxY },
+                { x: minX, y: maxY },
+            ],
         })
         colorCounter += 1
         selectedId.value = id
@@ -872,7 +1044,8 @@ function commitPlacement() {
 function handlePlacementClick(imgPt: Point) {
     if (activeTool.value === "none") return
     placementPoints.value.push(imgPt)
-    const needed = activeTool.value === "line" ? 2 : 3
+    const needed =
+        activeTool.value === "line" || activeTool.value === "rectangle" ? 2 : 3
     if (placementPoints.value.length >= needed) {
         commitPlacement()
     }
@@ -919,6 +1092,17 @@ function cloneMeasurement(m: Measurement): Measurement {
     if (m.type === "line") {
         return { ...m, a: { ...m.a }, b: { ...m.b } }
     }
+    if (m.type === "rectangle") {
+        return {
+            ...m,
+            corners: [
+                { ...m.corners[0] },
+                { ...m.corners[1] },
+                { ...m.corners[2] },
+                { ...m.corners[3] },
+            ],
+        }
+    }
     if (m.type === "ellipse") {
         return {
             ...m,
@@ -950,6 +1134,17 @@ function applyDrag(
                 b: { x: original.b.x + dx, y: original.b.y + dy },
             }
         }
+        if (original.type === "rectangle") {
+            return {
+                ...original,
+                corners: [
+                    { x: original.corners[0].x + dx, y: original.corners[0].y + dy },
+                    { x: original.corners[1].x + dx, y: original.corners[1].y + dy },
+                    { x: original.corners[2].x + dx, y: original.corners[2].y + dy },
+                    { x: original.corners[3].x + dx, y: original.corners[3].y + dy },
+                ],
+            }
+        }
         if (original.type === "ellipse") {
             return {
                 ...original,
@@ -969,6 +1164,28 @@ function applyDrag(
         if (original.type === "line") {
             if (handleKey === "a") return { ...original, a: { x: original.a.x + dx, y: original.a.y + dy } }
             if (handleKey === "b") return { ...original, b: { x: original.b.x + dx, y: original.b.y + dy } }
+        } else if (original.type === "rectangle") {
+            // Per spec: dragging an individual corner only moves that corner —
+            // the rect can become non-rectangular. The array index stays
+            // stable so TL/TR/BR/BL labels don't shift.
+            const cornerIdx: 0 | 1 | 2 | 3 | null =
+                handleKey === "c0" ? 0 :
+                handleKey === "c1" ? 1 :
+                handleKey === "c2" ? 2 :
+                handleKey === "c3" ? 3 : null
+            if (cornerIdx !== null) {
+                const next: [Point, Point, Point, Point] = [
+                    { ...original.corners[0] },
+                    { ...original.corners[1] },
+                    { ...original.corners[2] },
+                    { ...original.corners[3] },
+                ]
+                next[cornerIdx] = {
+                    x: original.corners[cornerIdx].x + dx,
+                    y: original.corners[cornerIdx].y + dy,
+                }
+                return { ...original, corners: next }
+            }
         } else if (original.type === "ellipse") {
             if (handleKey === "center") {
                 // Dragging the ellipse center translates the whole ellipse so
@@ -1266,6 +1483,10 @@ const placementHint = computed<string | null>(() => {
         if (n === 0) return "Click the first endpoint."
         return "Click the second endpoint."
     }
+    if (activeTool.value === "rectangle") {
+        if (n === 0) return "Click the first corner."
+        return "Click the opposite corner."
+    }
     if (activeTool.value === "ellipse") {
         if (n === 0) return "Click the ellipse center."
         if (n === 1) return "Click the first semi-axis endpoint."
@@ -1281,7 +1502,7 @@ const measurementSummaries = computed(() => {
         id: m.id,
         type: m.type,
         typeLabel: measurementTypeLabel(m),
-        label: measurementLabel(m),
+        label: measurementSummaryValue(m),
         color: getDatumColor(m.colorIndex),
         selected: m.id === selectedId.value,
     }))
@@ -1453,6 +1674,30 @@ watch(() => props.scalePxPerMm, () => { drawOverlay() })
                         <ellipse cx="12" cy="12" rx="9" ry="6" />
                     </svg>
                     Ellipse
+                </button>
+                <button
+                    class="inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors"
+                    :class="
+                        activeTool === 'rectangle'
+                            ? 'bg-primary/10 text-primary'
+                            : 'text-muted-foreground hover:text-foreground'
+                    "
+                    @click="setTool('rectangle')"
+                >
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <rect x="4" y="6" width="16" height="12" rx="1" />
+                    </svg>
+                    Rect
                 </button>
                 <button
                     class="inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors"
