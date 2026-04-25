@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue"
+import { ref, onMounted, onUnmounted } from "vue"
 import { useAppStore } from "@/stores/app"
 import { loadImage } from "@/lib/image-loader"
 import { extractExif } from "@/lib/exif"
@@ -21,17 +21,41 @@ const isDragging = ref(false)
 const error = ref("")
 const fileInput = ref<HTMLInputElement | null>(null)
 const cacheCount = ref(0)
+const confirmingClear = ref(false)
 
 const ACCEPTED = "image/*,.heic,.heif"
+// Auto-revert the "Are you sure?" prompt after this long of inactivity
+// so a stray first click can't be confirmed minutes later.
+const CLEAR_CONFIRM_TIMEOUT_MS = 4000
+
+let confirmTimer: ReturnType<typeof setTimeout> | null = null
 
 onMounted(() => {
     cacheCount.value = getCacheSize()
 })
 
-function handleClearCache() {
-    clearCache()
-    clearMeasurementCache()
-    cacheCount.value = 0
+onUnmounted(() => {
+    if (confirmTimer) clearTimeout(confirmTimer)
+})
+
+function handleClearCacheClick() {
+    if (confirmingClear.value) {
+        clearCache()
+        clearMeasurementCache()
+        cacheCount.value = 0
+        confirmingClear.value = false
+        if (confirmTimer) {
+            clearTimeout(confirmTimer)
+            confirmTimer = null
+        }
+        return
+    }
+    confirmingClear.value = true
+    if (confirmTimer) clearTimeout(confirmTimer)
+    confirmTimer = setTimeout(() => {
+        confirmingClear.value = false
+        confirmTimer = null
+    }, CLEAR_CONFIRM_TIMEOUT_MS)
 }
 
 async function handleFile(file: File) {
@@ -92,7 +116,47 @@ function onFileSelect(e: Event) {
 <template>
     <div class="flex min-h-[60vh] items-start justify-center pt-12">
         <div class="w-full max-w-2xl space-y-6">
-            <Card>
+            <Card class="relative">
+                <!-- Clear-cache lives top-right of the upload card so it's
+                     visible without scrolling but doesn't compete with the
+                     primary drop target. Two-step confirm: first click
+                     arms it; second click within
+                     CLEAR_CONFIRM_TIMEOUT_MS commits. -->
+                <Button
+                    v-if="cacheCount > 0"
+                    variant="ghost"
+                    size="sm"
+                    class="absolute right-2 top-2 h-7 gap-1.5 text-xs"
+                    :class="
+                        confirmingClear
+                            ? 'text-destructive hover:text-destructive'
+                            : 'text-muted-foreground/60 hover:text-destructive'
+                    "
+                    @click="handleClearCacheClick"
+                >
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <path d="M3 6h18" />
+                        <path
+                            d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"
+                        />
+                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                    </svg>
+                    {{
+                        confirmingClear
+                            ? "Are you sure?"
+                            : `Clear cache (${String(cacheCount)})`
+                    }}
+                </Button>
                 <CardHeader class="text-center">
                     <CardTitle class="text-lg">Load Source Image</CardTitle>
                     <CardDescription>
@@ -170,36 +234,6 @@ function onFileSelect(e: Event) {
                 </p>
                 </CardContent>
             </Card>
-            <div
-                v-if="cacheCount > 0"
-                class="flex justify-end"
-            >
-                <Button
-                    variant="ghost"
-                    size="sm"
-                    class="h-7 gap-1.5 text-xs text-muted-foreground/60 hover:text-destructive"
-                    @click="handleClearCache"
-                >
-                    <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="12"
-                        height="12"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                    >
-                        <path d="M3 6h18" />
-                        <path
-                            d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"
-                        />
-                        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                    </svg>
-                    Clear cache ({{ cacheCount }})
-                </Button>
-            </div>
 
             <div class="space-y-2 text-left">
                 <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground/70">Example</p>
