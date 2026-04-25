@@ -1299,6 +1299,20 @@ function onWheel(e: WheelEvent) {
     redraw()
 }
 
+// Once a press starts on the canvas we listen at the window level so the
+// drag survives the cursor leaving the canvas (or moving faster than the
+// browser's canvas-bound event firing). Re-attached on each press, removed
+// when the drag/pan ends.
+function attachWindowDragListeners() {
+    window.addEventListener("mousemove", onWindowMouseMove)
+    window.addEventListener("mouseup", onWindowMouseUp)
+}
+
+function detachWindowDragListeners() {
+    window.removeEventListener("mousemove", onWindowMouseMove)
+    window.removeEventListener("mouseup", onWindowMouseUp)
+}
+
 function onMouseDown(e: MouseEvent) {
     const { x, y } = getCanvasXY(e)
     if (activeTool.value !== "none") {
@@ -1311,34 +1325,53 @@ function onMouseDown(e: MouseEvent) {
         isPanning = true
         panStart = { x: e.clientX - viewOffsetX.value, y: e.clientY - viewOffsetY.value }
     }
+    if (dragState || isPanning) attachWindowDragListeners()
 }
 
-function onMouseMove(e: MouseEvent) {
+function onWindowMouseMove(e: MouseEvent) {
     if (dragState) {
         const { x, y } = getCanvasXY(e)
         pointerMove(x, y)
         return
     }
+    if (isPanning) {
+        viewOffsetX.value = e.clientX - panStart.x
+        viewOffsetY.value = e.clientY - panStart.y
+        redraw()
+    }
+}
+
+function onWindowMouseUp() {
+    pointerUp()
+    isPanning = false
+    detachWindowDragListeners()
+}
+
+function onMouseMove(e: MouseEvent) {
+    // While a drag/pan is in flight the window listener handles motion;
+    // here we only need the placement-preview cursor.
+    if (dragState || isPanning) return
     if (activeTool.value !== "none") {
         const { x, y } = getCanvasXY(e)
         placementCursor.value = screenToImg(x, y)
         drawOverlay()
-        return
     }
-    if (!isPanning) return
-    viewOffsetX.value = e.clientX - panStart.x
-    viewOffsetY.value = e.clientY - panStart.y
-    redraw()
 }
 
 function onMouseUp() {
-    pointerUp()
-    isPanning = false
+    // Mouseup that lands inside the canvas — covered by the window listener
+    // too, but we keep this so a quick click without movement still ends
+    // cleanly even if for some reason the window handler misses.
+    if (dragState || isPanning) {
+        pointerUp()
+        isPanning = false
+        detachWindowDragListeners()
+    }
 }
 
 function onMouseLeave() {
-    pointerUp()
-    isPanning = false
+    // Don't end the drag here — the window listener takes over while the
+    // cursor is outside the canvas. Just clear the placement preview.
     placementCursor.value = null
     drawOverlay()
 }
@@ -1601,6 +1634,7 @@ onMounted(() => {
 onUnmounted(() => {
     resizeObs?.disconnect()
     window.removeEventListener("keydown", onKeyDown)
+    detachWindowDragListeners()
 })
 
 watch(() => props.imageUrl, loadImg)
