@@ -1571,16 +1571,20 @@ watch(() => props.scalePxPerMm, () => { drawOverlay() })
                 >
                     No measurements yet. Pick a tool above and click on the image.
                 </div>
-                <button
+                <div
                     v-for="m in measurementSummaries"
                     :key="m.id"
-                    class="group flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs transition-colors"
+                    role="button"
+                    tabindex="0"
+                    class="group flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
                     :class="
                         m.selected
                             ? 'border-primary bg-primary/10'
                             : 'border-transparent hover:border-border hover:bg-muted'
                     "
                     @click="selectMeasurement(m.id)"
+                    @keydown.enter.prevent="selectMeasurement(m.id)"
+                    @keydown.space.prevent="selectMeasurement(m.id)"
                 >
                     <span
                         class="inline-block h-3 w-3 shrink-0 rounded-full border border-border"
@@ -1593,6 +1597,7 @@ watch(() => props.scalePxPerMm, () => { drawOverlay() })
                         {{ m.label }}
                     </span>
                     <button
+                        type="button"
                         class="ml-auto shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
                         :class="m.selected ? 'opacity-100' : ''"
                         title="Delete measurement"
@@ -1613,7 +1618,7 @@ watch(() => props.scalePxPerMm, () => { drawOverlay() })
                             <path d="m6 6 12 12" />
                         </svg>
                     </button>
-                </button>
+                </div>
             </div>
         </div>
     </div>
