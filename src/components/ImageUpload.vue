@@ -5,6 +5,7 @@ import { loadImage } from "@/lib/image-loader"
 import { extractExif } from "@/lib/exif"
 import { hashFile } from "@/lib/file-hash"
 import { loadDatums, clearCache, getCacheSize } from "@/lib/datum-cache"
+import { clearCache as clearMeasurementCache } from "@/lib/measurement-cache"
 import {
     Card,
     CardContent,
@@ -29,6 +30,7 @@ onMounted(() => {
 
 function handleClearCache() {
     clearCache()
+    clearMeasurementCache()
     cacheCount.value = 0
 }
 

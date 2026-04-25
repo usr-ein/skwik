@@ -31,6 +31,15 @@ import {
     TableRow,
 } from "@/components/ui/table"
 import CorrectedImageViewer from "@/components/CorrectedImageViewer.vue"
+// `defineExpose` in CorrectedImageViewer makes these methods available on
+// the template ref, but Vue's ComponentPublicInstance type doesn't surface
+// them automatically — we type the ref explicitly so the call is checked.
+type CorrectedImageViewerRef = InstanceType<typeof CorrectedImageViewer> & {
+    exportWithMeasurements: (opts: {
+        scope: "full" | "view"
+        includeScaleBar: boolean
+    }) => Promise<Blob>
+}
 import {
     loadSettings,
     saveSettings,
@@ -38,6 +47,7 @@ import {
 
 const store = useAppStore()
 const resultUrl = ref<string | null>(null)
+const viewerRef = ref<CorrectedImageViewerRef | null>(null)
 const error = ref("")
 const hasRun = ref(false)
 const cvReady = ref(false)
@@ -362,6 +372,37 @@ async function download() {
     a.download = `${baseName}-skwik.png`
     a.click()
     URL.revokeObjectURL(url)
+}
+
+// Download the corrected image with measurement annotations baked in.
+// scope="full": natural-resolution image + overlay → `-measured.png`.
+// scope="view": current viewport (zoom/pan) + overlay → `-measured-view.png`.
+// Both honour the existing `includeScaleBar` toggle. View export's bar is
+// sized for the on-screen pixel scale (image-px/mm × CSS view scale) so it
+// represents the same physical mm length the user is actually looking at.
+async function downloadMeasured(scope: "full" | "view") {
+    const viewer = viewerRef.value
+    if (!viewer || !store.deskewResult) return
+    try {
+        const blob = await viewer.exportWithMeasurements({
+            scope,
+            includeScaleBar: includeScaleBar.value,
+        })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        const baseName =
+            store.originalFile?.name.replace(/\.[^.]+$/, "") ?? "output"
+        a.download =
+            scope === "full"
+                ? `${baseName}-measured.png`
+                : `${baseName}-measured-view.png`
+        a.click()
+        URL.revokeObjectURL(url)
+    } catch (e) {
+        error.value =
+            e instanceof Error ? e.message : "Measured export failed"
+    }
 }
 
 </script>
@@ -819,6 +860,7 @@ async function download() {
                     </CardHeader>
                     <CardContent>
                         <CorrectedImageViewer
+                            ref="viewerRef"
                             :image-url="resultUrl"
                             :scale-px-per-mm="store.scalePxPerMm"
                         />
@@ -852,7 +894,7 @@ async function download() {
                         </TooltipContent>
                     </Tooltip>
                 </TooltipProvider>
-                <div class="flex items-center gap-3">
+                <div class="flex flex-wrap items-center justify-center gap-3">
                     <Button size="lg" @click="download">
                         <svg
                             xmlns="http://www.w3.org/2000/svg"
@@ -879,6 +921,74 @@ async function download() {
                         </svg>
                         Download PNG
                     </Button>
+                    <TooltipProvider>
+                        <Tooltip>
+                            <TooltipTrigger as-child>
+                                <Button
+                                    size="lg"
+                                    variant="secondary"
+                                    @click="downloadMeasured('full')"
+                                >
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        width="18"
+                                        height="18"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        class="mr-2"
+                                    >
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                        <polyline points="7 10 12 15 17 10" />
+                                        <line x1="12" x2="12" y1="15" y2="3" />
+                                        <path d="M3 3h6" />
+                                    </svg>
+                                    Download full + measurements
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" class="max-w-xs">
+                                Source image at full resolution with every
+                                measurement (lines, rectangles, ellipses,
+                                angles) and labels rendered on top.
+                            </TooltipContent>
+                        </Tooltip>
+                    </TooltipProvider>
+                    <TooltipProvider>
+                        <Tooltip>
+                            <TooltipTrigger as-child>
+                                <Button
+                                    size="lg"
+                                    variant="secondary"
+                                    @click="downloadMeasured('view')"
+                                >
+                                    <svg
+                                        xmlns="http://www.w3.org/2000/svg"
+                                        width="18"
+                                        height="18"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        class="mr-2"
+                                    >
+                                        <rect x="3" y="3" width="18" height="18" rx="2" />
+                                        <path d="M9 9h6v6H9z" />
+                                    </svg>
+                                    Download view + measurements
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" class="max-w-xs">
+                                Captures exactly what's visible in the
+                                viewer (current zoom and pan) with every
+                                measurement rendered on top.
+                            </TooltipContent>
+                        </Tooltip>
+                    </TooltipProvider>
                     <Button
                         size="lg"
                         variant="outline"

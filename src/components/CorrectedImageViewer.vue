@@ -3,7 +3,17 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue"
 import { useMediaQuery } from "@vueuse/core"
 import { nanoid } from "nanoid"
 import type { Point } from "@/types"
+import type {
+    LineMeasurement,
+    RectMeasurement,
+    EllipseMeasurement,
+    CircleMeasurement,
+    AngleMeasurement,
+    Measurement,
+} from "@/types/measurements"
 import { getDatumColor } from "@/lib/datums"
+import { useAppStore } from "@/stores/app"
+import { loadMeasurements, saveMeasurements } from "@/lib/measurement-cache"
 
 const props = defineProps<{
     imageUrl: string
@@ -32,53 +42,48 @@ const viewOffsetX = ref(0)
 const viewOffsetY = ref(0)
 
 // Tool state
-type ToolMode = "none" | "line" | "rectangle" | "ellipse" | "angle"
+type ToolMode = "none" | "line" | "rectangle" | "ellipse" | "circle" | "angle"
 const activeTool = ref<ToolMode>("none")
 const showGrid = ref(false)
 const gridSpacingMm = ref(10)
 
-// Measurement types. Geometry lives in image space so it is invariant under
-// pan/zoom and survives redraws without reprojection.
-interface BaseMeasurement {
-    id: string
-    colorIndex: number
-}
-interface LineMeasurement extends BaseMeasurement {
-    type: "line"
-    a: Point
-    b: Point
-}
-// Corner ordering [TL, TR, BR, BL] mirrors the RectDatum convention from
-// src/types/index.ts. Indices stay stable across drags even if the user
-// crosses corners — visual + hit-tests don't depend on TL actually being
-// top-left after reshape, matching the datum editor's behaviour.
-interface RectMeasurement extends BaseMeasurement {
-    type: "rectangle"
-    corners: [Point, Point, Point, Point]
-}
-interface EllipseMeasurement extends BaseMeasurement {
-    type: "ellipse"
-    center: Point
-    axisEndA: Point
-    axisEndB: Point
-}
-interface AngleMeasurement extends BaseMeasurement {
-    type: "angle"
-    vertex: Point
-    armA: Point
-    armB: Point
-}
-type Measurement =
-    | LineMeasurement
-    | RectMeasurement
-    | EllipseMeasurement
-    | AngleMeasurement
+// Measurement types live in `@/types/measurements` so the cache module and
+// other consumers can share them. Geometry is in image space so it stays
+// invariant under pan/zoom and survives redraws without reprojection.
+
+const store = useAppStore()
 
 const measurements = ref<Measurement[]>([])
 const selectedId = ref<string | null>(null)
 // Monotonically increasing counter so deleting a measurement doesn't recolor
 // the remaining ones. Each new measurement claims the next palette slot.
+// Reset on cache load to `max(loaded.colorIndex) + 1` so newly-added
+// measurements continue the sequence rather than reusing old colors.
 let colorCounter = 0
+
+function seedFromCache() {
+    const hash = store.fileHash
+    if (!hash) {
+        measurements.value = []
+        selectedId.value = null
+        colorCounter = 0
+        return
+    }
+    const loaded = loadMeasurements(hash)
+    if (loaded && loaded.length > 0) {
+        measurements.value = loaded
+        selectedId.value = null
+        let maxIdx = -1
+        for (const m of loaded) {
+            if (m.colorIndex > maxIdx) maxIdx = m.colorIndex
+        }
+        colorCounter = maxIdx + 1
+    } else {
+        measurements.value = []
+        selectedId.value = null
+        colorCounter = 0
+    }
+}
 
 // In-progress placement points (image space) while a placement tool is active.
 const placementPoints = ref<Point[]>([])
@@ -177,14 +182,16 @@ function drawOverlay() {
         drawGrid(ctx, image)
     }
 
+    const rt = makeLiveCtx()
+
     // Draw unselected first (faint) so the selected measurement always sits
     // on top with full opacity and its handles aren't occluded.
     for (const m of measurements.value) {
         if (m.id === selectedId.value) continue
-        drawMeasurement(ctx, m, false)
+        drawMeasurement(ctx, m, false, rt)
     }
     const selected = measurements.value.find((m) => m.id === selectedId.value)
-    if (selected) drawMeasurement(ctx, selected, true)
+    if (selected) drawMeasurement(ctx, selected, true, rt)
 
     // Placement preview overlaying everything, in the active tool's color
     // slot (= next palette slot the new measurement will claim).
@@ -256,6 +263,45 @@ function drawGrid(
     ctx.restore()
 }
 
+// Render context for drawing measurements. The live overlay constructs one
+// from the current view transform; the export path constructs its own so
+// the same draw helpers can paint into an offscreen canvas at any scale.
+//   scale/offsetX/offsetY: the image→canvas affine to apply.
+//   strokeMul: multiplier on stroke widths, font sizes, and handle radii.
+//     1 keeps the on-screen visual; >1 scales them up so they read at the
+//     same relative size when exporting at a higher pixel resolution.
+//   drawHandles: live overlay draws interactive control points; export
+//     suppresses them since they're UI, not annotation.
+//   drawSelectionDecorations: live overlay highlights the selected
+//     measurement with a white outline + dashed unselected siblings;
+//     export draws every measurement at full opacity, no dashing.
+interface RenderCtx {
+    scale: number
+    offsetX: number
+    offsetY: number
+    strokeMul: number
+    drawHandles: boolean
+    drawSelectionDecorations: boolean
+}
+
+function makeLiveCtx(): RenderCtx {
+    return {
+        scale: viewScale.value,
+        offsetX: viewOffsetX.value,
+        offsetY: viewOffsetY.value,
+        strokeMul: 1,
+        drawHandles: true,
+        drawSelectionDecorations: true,
+    }
+}
+
+function imgToCtx(pt: Point, t: RenderCtx): Point {
+    return {
+        x: pt.x * t.scale + t.offsetX,
+        y: pt.y * t.scale + t.offsetY,
+    }
+}
+
 function imgToScreen(pt: Point): Point {
     return {
         x: pt.x * viewScale.value + viewOffsetX.value,
@@ -288,6 +334,12 @@ function ellipseAxesMm(m: EllipseMeasurement): { semiMajor: number; semiMinor: n
         semiMajor: Math.max(lenA, lenB),
         semiMinor: Math.min(lenA, lenB),
     }
+}
+
+function circleRadiusMm(m: CircleMeasurement): number {
+    const dx = m.edge.x - m.center.x
+    const dy = m.edge.y - m.center.y
+    return Math.hypot(dx, dy) / props.scalePxPerMm
 }
 
 function angleDegrees(m: AngleMeasurement): number {
@@ -362,6 +414,12 @@ function measurementLabel(m: Measurement): string {
         const area = Math.PI * semiMajor * semiMinor
         return `${formatMm(semiMajor)}×${formatMm(semiMinor)} mm · ${formatArea(area)} mm²`
     }
+    if (m.type === "circle") {
+        const r = circleRadiusMm(m)
+        const diameter = 2 * r
+        const area = Math.PI * r * r
+        return `⌀ ${diameter.toFixed(1)} mm · ${formatRectArea(area)} mm²`
+    }
     return `${angleDegrees(m).toFixed(1)}°`
 }
 
@@ -369,6 +427,7 @@ function measurementTypeLabel(m: Measurement): string {
     if (m.type === "line") return "Line"
     if (m.type === "rectangle") return "Rect"
     if (m.type === "ellipse") return "Ellipse"
+    if (m.type === "circle") return "Circle"
     return "Angle"
 }
 
@@ -378,6 +437,10 @@ function measurementSummaryValue(m: Measurement): string {
     if (m.type === "rectangle") {
         const { widthMm, heightMm } = rectDimensionsMm(m)
         return `${widthMm.toFixed(1)}×${heightMm.toFixed(1)} mm`
+    }
+    if (m.type === "circle") {
+        const diameter = 2 * circleRadiusMm(m)
+        return `⌀ ${diameter.toFixed(1)} mm`
     }
     return measurementLabel(m)
 }
@@ -398,57 +461,77 @@ function labelAnchor(m: Measurement): Point {
     if (m.type === "ellipse") {
         return m.center
     }
+    if (m.type === "circle") {
+        return m.center
+    }
     return m.vertex
 }
 
-// Label rectangle in screen space. Width depends on text so we measure with
-// the same ctx we are about to render with. Height is fixed for uniformity.
+// Label rectangle in canvas space. Width depends on text so we measure with
+// the same ctx we are about to render with. Sizes scale with strokeMul so
+// labels stay legible when exporting at a higher pixel resolution.
 function labelRect(
     ctx: CanvasRenderingContext2D,
     m: Measurement,
-): { x: number; y: number; w: number; h: number; textX: number; textY: number } {
-    const anchor = imgToScreen(labelAnchor(m))
+    rt: RenderCtx,
+): { x: number; y: number; w: number; h: number; textX: number; textY: number; fontPx: number } {
+    const anchor = imgToCtx(labelAnchor(m), rt)
     const text = measurementLabel(m)
+    const fontPx = 13 * rt.strokeMul
     ctx.save()
-    ctx.font = "bold 13px monospace"
+    ctx.font = `bold ${String(fontPx)}px monospace`
     const tw = ctx.measureText(text).width
     ctx.restore()
-    const pad = 6
-    const h = 20
+    const pad = 6 * rt.strokeMul
+    const h = 20 * rt.strokeMul
     const w = tw + pad * 2
     // Offset the label above the anchor so it doesn't sit on top of a handle.
-    const offsetY = m.type === "angle" ? 22 : 14
+    const offsetY = (m.type === "angle" ? 22 : 14) * rt.strokeMul
     const x = anchor.x - w / 2
     const y = anchor.y - h / 2 - offsetY
-    return { x, y, w, h, textX: anchor.x, textY: anchor.y - offsetY }
+    return { x, y, w, h, textX: anchor.x, textY: anchor.y - offsetY, fontPx }
 }
 
 function drawMeasurement(
     ctx: CanvasRenderingContext2D,
     m: Measurement,
     isSelected: boolean,
+    rt: RenderCtx,
 ) {
     const baseColor = getDatumColor(m.colorIndex)
-    const strokeColor = isSelected ? "#ffffff" : baseColor
-    const lineAlpha = isSelected ? 1.0 : 0.8
-    const lineWidth = isSelected ? 3 : 2
+    const decorate = rt.drawSelectionDecorations
+    const strokeColor = decorate && isSelected ? "#ffffff" : baseColor
+    const lineAlpha = decorate ? (isSelected ? 1.0 : 0.8) : 1.0
+    const lineWidth = (decorate && isSelected ? 3 : 2) * rt.strokeMul
 
     ctx.save()
     ctx.globalAlpha = lineAlpha
 
     if (m.type === "line") {
-        drawLineGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
+        drawLineGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected, rt)
     } else if (m.type === "rectangle") {
-        drawRectGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
+        drawRectGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected, rt)
     } else if (m.type === "ellipse") {
-        drawEllipseGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
+        drawEllipseGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected, rt)
+    } else if (m.type === "circle") {
+        drawCircleGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected, rt)
     } else {
-        drawAngleGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected)
+        drawAngleGeometry(ctx, m, strokeColor, baseColor, lineWidth, isSelected, rt)
     }
 
     ctx.globalAlpha = 1.0
-    drawLabel(ctx, m, baseColor, isSelected)
+    drawLabel(ctx, m, baseColor, isSelected, rt)
     ctx.restore()
+}
+
+// Selected items in the live view + everything in export mode draw solid;
+// unselected items in the live view get a dashed stroke to fade them back.
+function applyDash(ctx: CanvasRenderingContext2D, isSelected: boolean, rt: RenderCtx) {
+    if (rt.drawSelectionDecorations && !isSelected) {
+        ctx.setLineDash([6 * rt.strokeMul, 3 * rt.strokeMul])
+    } else {
+        ctx.setLineDash([])
+    }
 }
 
 function drawLineGeometry(
@@ -458,19 +541,22 @@ function drawLineGeometry(
     handleColor: string,
     lineWidth: number,
     isSelected: boolean,
+    rt: RenderCtx,
 ) {
-    const sa = imgToScreen(m.a)
-    const sb = imgToScreen(m.b)
+    const sa = imgToCtx(m.a, rt)
+    const sb = imgToCtx(m.b, rt)
     ctx.beginPath()
     ctx.moveTo(sa.x, sa.y)
     ctx.lineTo(sb.x, sb.y)
     ctx.strokeStyle = strokeColor
     ctx.lineWidth = lineWidth
-    ctx.setLineDash(isSelected ? [] : [6, 3])
+    applyDash(ctx, isSelected, rt)
     ctx.stroke()
     ctx.setLineDash([])
-    drawHandle(ctx, sa, handleColor, isSelected)
-    drawHandle(ctx, sb, handleColor, isSelected)
+    if (rt.drawHandles) {
+        drawHandle(ctx, sa, handleColor, isSelected, false, rt)
+        drawHandle(ctx, sb, handleColor, isSelected, false, rt)
+    }
 }
 
 function drawRectGeometry(
@@ -480,8 +566,9 @@ function drawRectGeometry(
     handleColor: string,
     lineWidth: number,
     isSelected: boolean,
+    rt: RenderCtx,
 ) {
-    const screenCorners = m.corners.map(imgToScreen)
+    const screenCorners = m.corners.map((p) => imgToCtx(p, rt))
     ctx.beginPath()
     for (let i = 0; i < screenCorners.length; i++) {
         const p = screenCorners[i]
@@ -492,13 +579,15 @@ function drawRectGeometry(
     ctx.closePath()
     ctx.strokeStyle = strokeColor
     ctx.lineWidth = lineWidth
-    ctx.setLineDash(isSelected ? [] : [6, 3])
+    applyDash(ctx, isSelected, rt)
     ctx.stroke()
     ctx.setLineDash([])
     // Don't fill the interior — keeps what's underneath visible, matching
     // the line/ellipse/angle visual style.
-    for (const p of screenCorners) {
-        drawHandle(ctx, p, handleColor, isSelected)
+    if (rt.drawHandles) {
+        for (const p of screenCorners) {
+            drawHandle(ctx, p, handleColor, isSelected, false, rt)
+        }
     }
 }
 
@@ -509,12 +598,13 @@ function drawEllipseGeometry(
     handleColor: string,
     lineWidth: number,
     isSelected: boolean,
+    rt: RenderCtx,
 ) {
     // Parametric draw using the two conjugate axis vectors; handles the
     // general (non-perpendicular) case the datum editor also uses.
-    const c = imgToScreen(m.center)
-    const a = imgToScreen(m.axisEndA)
-    const b = imgToScreen(m.axisEndB)
+    const c = imgToCtx(m.center, rt)
+    const a = imgToCtx(m.axisEndA, rt)
+    const b = imgToCtx(m.axisEndB, rt)
     const vAx = a.x - c.x
     const vAy = a.y - c.y
     const vBx = b.x - c.x
@@ -533,7 +623,7 @@ function drawEllipseGeometry(
     }
     ctx.strokeStyle = strokeColor
     ctx.lineWidth = lineWidth
-    ctx.setLineDash(isSelected ? [] : [6, 3])
+    applyDash(ctx, isSelected, rt)
     ctx.stroke()
     ctx.setLineDash([])
 
@@ -545,13 +635,57 @@ function drawEllipseGeometry(
     ctx.moveTo(c.x, c.y)
     ctx.lineTo(b.x, b.y)
     ctx.strokeStyle = strokeColor
-    ctx.lineWidth = 1
+    ctx.lineWidth = 1 * rt.strokeMul
     ctx.stroke()
     ctx.restore()
 
-    drawHandle(ctx, c, handleColor, isSelected, true)
-    drawHandle(ctx, a, handleColor, isSelected)
-    drawHandle(ctx, b, handleColor, isSelected)
+    if (rt.drawHandles) {
+        drawHandle(ctx, c, handleColor, isSelected, true, rt)
+        drawHandle(ctx, a, handleColor, isSelected, false, rt)
+        drawHandle(ctx, b, handleColor, isSelected, false, rt)
+    }
+}
+
+function drawCircleGeometry(
+    ctx: CanvasRenderingContext2D,
+    m: CircleMeasurement,
+    strokeColor: string,
+    handleColor: string,
+    lineWidth: number,
+    isSelected: boolean,
+    rt: RenderCtx,
+) {
+    // True circle: radius is the canvas-space distance from center to edge
+    // under the active RenderCtx affine. Drawing in canvas space (rather
+    // than image space + ctx.scale) keeps the stroke width consistent at
+    // any zoom level, matching the line/ellipse style.
+    const c = imgToCtx(m.center, rt)
+    const e = imgToCtx(m.edge, rt)
+    const r = Math.hypot(e.x - c.x, e.y - c.y)
+
+    ctx.beginPath()
+    ctx.arc(c.x, c.y, r, 0, Math.PI * 2)
+    ctx.strokeStyle = strokeColor
+    ctx.lineWidth = lineWidth
+    applyDash(ctx, isSelected, rt)
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    // Faint radius hint, mirroring the ellipse's axis hint lines.
+    ctx.save()
+    ctx.globalAlpha *= 0.5
+    ctx.beginPath()
+    ctx.moveTo(c.x, c.y)
+    ctx.lineTo(e.x, e.y)
+    ctx.strokeStyle = strokeColor
+    ctx.lineWidth = 1 * rt.strokeMul
+    ctx.stroke()
+    ctx.restore()
+
+    if (rt.drawHandles) {
+        drawHandle(ctx, c, handleColor, isSelected, true, rt)
+        drawHandle(ctx, e, handleColor, isSelected, false, rt)
+    }
 }
 
 function drawAngleGeometry(
@@ -561,10 +695,11 @@ function drawAngleGeometry(
     handleColor: string,
     lineWidth: number,
     isSelected: boolean,
+    rt: RenderCtx,
 ) {
-    const v = imgToScreen(m.vertex)
-    const a = imgToScreen(m.armA)
-    const b = imgToScreen(m.armB)
+    const v = imgToCtx(m.vertex, rt)
+    const a = imgToCtx(m.armA, rt)
+    const b = imgToCtx(m.armB, rt)
 
     ctx.beginPath()
     ctx.moveTo(a.x, a.y)
@@ -572,13 +707,13 @@ function drawAngleGeometry(
     ctx.lineTo(b.x, b.y)
     ctx.strokeStyle = strokeColor
     ctx.lineWidth = lineWidth
-    ctx.setLineDash(isSelected ? [] : [6, 3])
+    applyDash(ctx, isSelected, rt)
     ctx.stroke()
     ctx.setLineDash([])
 
     const lenA = Math.hypot(a.x - v.x, a.y - v.y)
     const lenB = Math.hypot(b.x - v.x, b.y - v.y)
-    const arcR = Math.max(16, Math.min(lenA, lenB) * 0.3)
+    const arcR = Math.max(16 * rt.strokeMul, Math.min(lenA, lenB) * 0.3)
     if (lenA > 2 && lenB > 2) {
         const thetaA = Math.atan2(a.y - v.y, a.x - v.x)
         const thetaB = Math.atan2(b.y - v.y, b.x - v.x)
@@ -592,14 +727,16 @@ function drawAngleGeometry(
         ctx.beginPath()
         ctx.arc(v.x, v.y, arcR, thetaA, thetaA + delta, delta < 0)
         ctx.strokeStyle = strokeColor
-        ctx.lineWidth = 1.5
+        ctx.lineWidth = 1.5 * rt.strokeMul
         ctx.stroke()
         ctx.restore()
     }
 
-    drawHandle(ctx, v, handleColor, isSelected, true)
-    drawHandle(ctx, a, handleColor, isSelected)
-    drawHandle(ctx, b, handleColor, isSelected)
+    if (rt.drawHandles) {
+        drawHandle(ctx, v, handleColor, isSelected, true, rt)
+        drawHandle(ctx, a, handleColor, isSelected, false, rt)
+        drawHandle(ctx, b, handleColor, isSelected, false, rt)
+    }
 }
 
 // Handle rendering follows the datum-editor precedent: a filled color center
@@ -616,26 +753,27 @@ function drawHandle(
     s: Point,
     color: string,
     isSelected: boolean,
-    primary = false,
+    primary: boolean,
+    rt: RenderCtx,
 ) {
     ctx.save()
-    if (isSelected) {
-        const r = primary ? 8 : 6.5
+    if (isSelected && rt.drawSelectionDecorations) {
+        const r = (primary ? 8 : 6.5) * rt.strokeMul
         ctx.beginPath()
         ctx.arc(s.x, s.y, r, 0, Math.PI * 2)
         ctx.fillStyle = color
         ctx.fill()
         ctx.strokeStyle = "#ffffff"
-        ctx.lineWidth = 2
+        ctx.lineWidth = 2 * rt.strokeMul
         ctx.stroke()
     } else {
-        ctx.globalAlpha = 0.5
+        if (rt.drawSelectionDecorations) ctx.globalAlpha = 0.5
         ctx.beginPath()
-        ctx.arc(s.x, s.y, 3, 0, Math.PI * 2)
+        ctx.arc(s.x, s.y, 3 * rt.strokeMul, 0, Math.PI * 2)
         ctx.fillStyle = color
         ctx.fill()
         ctx.strokeStyle = "#ffffff"
-        ctx.lineWidth = 1
+        ctx.lineWidth = 1 * rt.strokeMul
         ctx.stroke()
     }
     ctx.restore()
@@ -646,20 +784,29 @@ function drawLabel(
     m: Measurement,
     baseColor: string,
     isSelected: boolean,
+    rt: RenderCtx,
 ) {
-    const rect = labelRect(ctx, m)
-    const labelAlpha = isSelected ? 1.0 : 0.5
+    const rect = labelRect(ctx, m, rt)
+    const decorate = rt.drawSelectionDecorations
+    const labelAlpha = decorate ? (isSelected ? 1.0 : 0.5) : 1.0
     ctx.save()
     ctx.globalAlpha = labelAlpha
-    ctx.fillStyle = isSelected ? baseColor : "rgba(0, 0, 0, 0.75)"
-    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 4)
+    // In export mode every label uses the measurement's own colour for the
+    // pill — it's the only signal that ties a label to its geometry without
+    // the live highlight.
+    ctx.fillStyle = decorate
+        ? isSelected
+            ? baseColor
+            : "rgba(0, 0, 0, 0.75)"
+        : baseColor
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 4 * rt.strokeMul)
     ctx.fill()
-    if (isSelected) {
+    if (decorate && isSelected) {
         ctx.strokeStyle = "#ffffff"
-        ctx.lineWidth = 1
+        ctx.lineWidth = 1 * rt.strokeMul
         ctx.stroke()
     }
-    ctx.font = "bold 13px monospace"
+    ctx.font = `bold ${String(rect.fontPx)}px monospace`
     ctx.fillStyle = "#ffffff"
     ctx.textAlign = "center"
     ctx.textBaseline = "middle"
@@ -750,6 +897,16 @@ function drawPlacementPreview(ctx: CanvasRenderingContext2D) {
             }
             ctx.stroke()
         }
+    } else if (activeTool.value === "circle" && sPts.length >= 1 && sPts[0] && sCursor) {
+        const center = sPts[0]
+        const r = Math.hypot(sCursor.x - center.x, sCursor.y - center.y)
+        ctx.beginPath()
+        ctx.moveTo(center.x, center.y)
+        ctx.lineTo(sCursor.x, sCursor.y)
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.arc(center.x, center.y, r, 0, Math.PI * 2)
+        ctx.stroke()
     } else if (activeTool.value === "angle" && sPts.length >= 1 && sPts[0]) {
         const v = sPts[0]
         const a = sPts[1] ?? sCursor
@@ -788,6 +945,7 @@ function getCanvasXY(e: MouseEvent | Touch): { x: number; y: number } {
 const HANDLE_HIT_PX = 14
 const LINE_HIT_PX = 6
 const ELLIPSE_HIT_PX = 7
+const CIRCLE_HIT_PX = 6
 
 function pointToSegmentDistance(
     p: Point,
@@ -881,6 +1039,12 @@ function getHandlePositions(m: Measurement): { key: string; pt: Point }[] {
             { key: "axisEndB", pt: m.axisEndB },
         ]
     }
+    if (m.type === "circle") {
+        return [
+            { key: "center", pt: m.center },
+            { key: "edge", pt: m.edge },
+        ]
+    }
     return [
         { key: "vertex", pt: m.vertex },
         { key: "armA", pt: m.armA },
@@ -914,8 +1078,9 @@ function hitTest(cursorScreen: Point): HitResult | null {
     }
 
     // Priority 2: labels.
+    const liveRt = makeLiveCtx()
     for (const m of ordered) {
-        const rect = labelRect(ctx, m)
+        const rect = labelRect(ctx, m, liveRt)
         if (
             cursorScreen.x >= rect.x &&
             cursorScreen.x <= rect.x + rect.w &&
@@ -953,6 +1118,19 @@ function hitTest(cursorScreen: Point): HitResult | null {
             }
         } else if (m.type === "ellipse") {
             if (ellipseCurveDistance(cursorScreen, m) <= ELLIPSE_HIT_PX) {
+                return { measurementId: m.id, kind: "geometry", handleKey: null }
+            }
+        } else if (m.type === "circle") {
+            // Edge: near the circumference. Interior: anywhere inside the
+            // circle, so big circles are easy to grab without precision.
+            const c = imgToScreen(m.center)
+            const e = imgToScreen(m.edge)
+            const radius = Math.hypot(e.x - c.x, e.y - c.y)
+            const distToCenter = Math.hypot(cursorScreen.x - c.x, cursorScreen.y - c.y)
+            if (
+                Math.abs(distToCenter - radius) <= CIRCLE_HIT_PX ||
+                distToCenter <= radius
+            ) {
                 return { measurementId: m.id, kind: "geometry", handleKey: null }
             }
         } else {
@@ -1022,6 +1200,19 @@ function commitPlacement() {
         colorCounter += 1
         selectedId.value = id
         placementPoints.value = []
+    } else if (activeTool.value === "circle" && pts.length === 2) {
+        const [center, edge] = pts as [Point, Point]
+        const id = nanoid()
+        measurements.value.push({
+            id,
+            type: "circle",
+            colorIndex: colorCounter,
+            center,
+            edge,
+        })
+        colorCounter += 1
+        selectedId.value = id
+        placementPoints.value = []
     } else if (activeTool.value === "angle" && pts.length === 3) {
         const [vertex, armA, armB] = pts as [Point, Point, Point]
         const id = nanoid()
@@ -1043,7 +1234,11 @@ function handlePlacementClick(imgPt: Point) {
     if (activeTool.value === "none") return
     placementPoints.value.push(imgPt)
     const needed =
-        activeTool.value === "line" || activeTool.value === "rectangle" ? 2 : 3
+        activeTool.value === "line" ||
+        activeTool.value === "rectangle" ||
+        activeTool.value === "circle"
+            ? 2
+            : 3
     if (placementPoints.value.length >= needed) {
         commitPlacement()
     }
@@ -1109,6 +1304,13 @@ function cloneMeasurement(m: Measurement): Measurement {
             axisEndB: { ...m.axisEndB },
         }
     }
+    if (m.type === "circle") {
+        return {
+            ...m,
+            center: { ...m.center },
+            edge: { ...m.edge },
+        }
+    }
     return {
         ...m,
         vertex: { ...m.vertex },
@@ -1149,6 +1351,13 @@ function applyDrag(
                 center: { x: original.center.x + dx, y: original.center.y + dy },
                 axisEndA: { x: original.axisEndA.x + dx, y: original.axisEndA.y + dy },
                 axisEndB: { x: original.axisEndB.x + dx, y: original.axisEndB.y + dy },
+            }
+        }
+        if (original.type === "circle") {
+            return {
+                ...original,
+                center: { x: original.center.x + dx, y: original.center.y + dy },
+                edge: { x: original.edge.x + dx, y: original.edge.y + dy },
             }
         }
         return {
@@ -1220,6 +1429,20 @@ function applyDrag(
             }
             if (handleKey === "axisEndB") {
                 return { ...original, axisEndB: { x: original.axisEndB.x + dx, y: original.axisEndB.y + dy } }
+            }
+        } else if (original.type === "circle") {
+            if (handleKey === "center") {
+                // Dragging the center translates the whole circle so the
+                // radius is preserved.
+                return {
+                    ...original,
+                    center: { x: original.center.x + dx, y: original.center.y + dy },
+                    edge: { x: original.edge.x + dx, y: original.edge.y + dy },
+                }
+            }
+            if (handleKey === "edge") {
+                // Edge follows the cursor; center stays put → radius changes.
+                return { ...original, edge: { x: original.edge.x + dx, y: original.edge.y + dy } }
             }
         } else {
             if (handleKey === "vertex") {
@@ -1551,6 +1774,10 @@ const placementHint = computed<string | null>(() => {
         if (n === 1) return "Click the first semi-axis endpoint."
         return "Click the second semi-axis endpoint."
     }
+    if (activeTool.value === "circle") {
+        if (n === 0) return "Click the center."
+        return "Click a point on the circumference."
+    }
     if (n === 0) return "Click the angle vertex."
     if (n === 1) return "Click the first arm endpoint."
     return "Click the second arm endpoint."
@@ -1567,94 +1794,213 @@ const measurementSummaries = computed(() => {
     }))
 })
 
-// Scale bar export — unchanged from the previous version, preserved verbatim
-// so downstream callers (ResultViewer) keep working if they ever wire it up.
-function exportWithScaleBar(): Promise<Blob> {
+// Scale-bar primitive shared by the legacy `exportWithScaleBar` (image only)
+// and the new `exportWithMeasurements` (image + overlay). Returns a fresh
+// canvas of width=src.width, height=src.height + barHeight with the source
+// blitted on top and the bar drawn into the bottom strip.
+//   srcCanvas: the bitmap to ride on top of the bar (image, or image +
+//     overlay in canvas-space).
+//   pxPerMm: canvas-pixels per real-world millimetre. The bar's mm length
+//     is picked from this so it represents the same physical span the
+//     output bitmap does. For full-resolution exports this is the source
+//     scale; for view exports this is `props.scalePxPerMm * viewScale`
+//     because the viewport zoom changes how many canvas pixels span a mm.
+function appendScaleBarCanvas(
+    srcCanvas: HTMLCanvasElement,
+    pxPerMm: number,
+): HTMLCanvasElement {
+    const iw = srcCanvas.width
+    const ih = srcCanvas.height
+    const unit = Math.max(iw / 100, 8)
+    const barHeightPx = Math.round(unit * 5)
+    const out = document.createElement("canvas")
+    out.width = iw
+    out.height = ih + barHeightPx
+    const ctx = out.getContext("2d")
+    if (!ctx) return srcCanvas
+    ctx.drawImage(srcCanvas, 0, 0)
+    ctx.fillStyle = "#000"
+    ctx.fillRect(0, ih, iw, barHeightPx)
+
+    const imgWidthMm = pxPerMm > 0 ? iw / pxPerMm : 0
+    const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
+    const targetMm = imgWidthMm * 0.2
+    let barMm = niceSteps[0] ?? 10
+    for (const s of niceSteps) {
+        barMm = s
+        if (s >= targetMm) break
+    }
+    const barWidthPx = barMm * pxPerMm
+
+    const margin = Math.round(unit * 2)
+    const barX = margin
+    const barY = ih + barHeightPx / 2
+    const barThick = Math.max(Math.round(unit * 0.6), 4)
+    const tickH = Math.round(unit * 1.5)
+    const tickW = Math.max(2, Math.round(unit * 0.15))
+
+    ctx.fillStyle = "#fff"
+    ctx.fillRect(barX, barY - barThick / 2, barWidthPx, barThick)
+    ctx.fillRect(barX, barY - tickH / 2, tickW, tickH)
+    ctx.fillRect(
+        barX + barWidthPx - tickW,
+        barY - tickH / 2,
+        tickW,
+        tickH,
+    )
+
+    const fontSize = Math.round(unit * 1.4)
+    ctx.font = `bold ${String(fontSize)}px monospace`
+    ctx.fillStyle = "#fff"
+    ctx.textAlign = "center"
+    ctx.textBaseline = "bottom"
+    ctx.fillText(
+        `${String(barMm)} mm`,
+        barX + barWidthPx / 2,
+        barY - tickH / 2 - Math.round(unit * 0.3),
+    )
+
+    const smallFont = Math.round(unit * 1)
+    ctx.textAlign = "right"
+    ctx.textBaseline = "middle"
+    ctx.font = `${String(smallFont)}px monospace`
+    ctx.fillStyle = "rgba(255,255,255,0.6)"
+    // Right-side annotation echoes the canvas-pixel scale so a viewer can
+    // sanity-check it. We round to 2 decimals because the view-export scale
+    // can be fractional; integer scales fall through to no-decimal.
+    const pxPerMmText =
+        Math.abs(pxPerMm - Math.round(pxPerMm)) < 1e-6
+            ? String(Math.round(pxPerMm))
+            : pxPerMm.toFixed(2)
+    ctx.fillText(`${pxPerMmText} px/mm`, iw - margin, barY)
+
+    return out
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
     return new Promise((resolve, reject) => {
-        const image = img.value
-        if (!image) {
-            console.error("[scale-bar] img.value is null")
-            reject(new Error("No image loaded for scale bar export"))
-            return
-        }
-
-        const iw = image.naturalWidth
-        const ih = image.naturalHeight
-        console.log(`[scale-bar] image ${String(iw)}×${String(ih)}, scale=${String(props.scalePxPerMm)} px/mm`)
-
-        const unit = Math.max(iw / 100, 8)
-        const barHeightPx = Math.round(unit * 5)
-        const canvas = document.createElement("canvas")
-        canvas.width = iw
-        canvas.height = ih + barHeightPx
-
-        const ctx = canvas.getContext("2d")
-        if (!ctx) {
-            reject(new Error("No 2D context"))
-            return
-        }
-
-        ctx.drawImage(image, 0, 0)
-
-        ctx.fillStyle = "#000"
-        ctx.fillRect(0, ih, iw, barHeightPx)
-
-        const imgWidthMm = iw / props.scalePxPerMm
-        const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
-        const targetMm = imgWidthMm * 0.2
-        let barMm = niceSteps[0] ?? 10
-        for (const s of niceSteps) {
-            barMm = s
-            if (s >= targetMm) break
-        }
-        const barWidthPx = barMm * props.scalePxPerMm
-
-        const margin = Math.round(unit * 2)
-        const barX = margin
-        const barY = ih + barHeightPx / 2
-        const barThick = Math.max(Math.round(unit * 0.6), 4)
-        const tickH = Math.round(unit * 1.5)
-
-        console.log(`[scale-bar] barMm=${String(barMm)}, barWidthPx=${barWidthPx.toFixed(0)}, barHeight=${String(barHeightPx)}, unit=${unit.toFixed(1)}`)
-
-        ctx.fillStyle = "#fff"
-        ctx.fillRect(barX, barY - barThick / 2, barWidthPx, barThick)
-
-        ctx.fillRect(barX, barY - tickH / 2, Math.max(2, unit * 0.15), tickH)
-        ctx.fillRect(barX + barWidthPx - Math.max(2, unit * 0.15), barY - tickH / 2, Math.max(2, unit * 0.15), tickH)
-
-        const fontSize = Math.round(unit * 1.4)
-        const label = `${String(barMm)} mm`
-        ctx.font = `bold ${String(fontSize)}px monospace`
-        ctx.fillStyle = "#fff"
-        ctx.textAlign = "center"
-        ctx.textBaseline = "bottom"
-        ctx.fillText(label, barX + barWidthPx / 2, barY - tickH / 2 - Math.round(unit * 0.3))
-
-        const smallFont = Math.round(unit * 1)
-        ctx.textAlign = "right"
-        ctx.textBaseline = "middle"
-        ctx.font = `${String(smallFont)}px monospace`
-        ctx.fillStyle = "rgba(255,255,255,0.6)"
-        ctx.fillText(
-            `${String(props.scalePxPerMm)} px/mm`,
-            iw - margin,
-            barY,
-        )
-
         canvas.toBlob((b) => {
-            console.log(`[scale-bar] blob: ${b ? String(Math.round(b.size / 1024)) + " KB" : "NULL"}`)
             if (b) resolve(b)
             else reject(new Error("toBlob failed"))
         }, "image/png")
     })
 }
 
-defineExpose({ exportWithScaleBar })
+// Legacy export: bare image + scale bar, no measurements. Preserved as-is
+// for any caller still wired to it (currently none — ResultViewer's
+// addScaleBar handles the no-measurements case directly).
+function exportWithScaleBar(): Promise<Blob> {
+    const image = img.value
+    if (!image) return Promise.reject(new Error("No image loaded for scale bar export"))
+    const iw = image.naturalWidth
+    const ih = image.naturalHeight
+    const base = document.createElement("canvas")
+    base.width = iw
+    base.height = ih
+    const bctx = base.getContext("2d")
+    if (!bctx) return Promise.reject(new Error("No 2D context"))
+    bctx.drawImage(image, 0, 0)
+    const out = appendScaleBarCanvas(base, props.scalePxPerMm)
+    return canvasToBlob(out)
+}
+
+// New: export the deskewed image with all measurement annotations baked
+// in. Two scopes:
+//   "full": output is the source bitmap at its natural resolution. Stroke
+//     widths / handle radii / font sizes are scaled up by
+//     image.naturalWidth / overlay.width so the annotation reads at the
+//     same visual weight as on screen relative to the image.
+//   "view": output is the visible viewport at its current canvas pixel
+//     dimensions. Image + measurements are drawn with the live transform,
+//     i.e. exactly what the user sees. Stroke widths inherit screen size
+//     (strokeMul=1).
+// Handles, dashed/faded selection styling, and the placement preview are
+// suppressed in both — those are interactive UI, not annotation.
+//
+// Filenames are decided by the caller; the function only returns the blob.
+function exportWithMeasurements(opts: {
+    scope: "full" | "view"
+    includeScaleBar: boolean
+}): Promise<Blob> {
+    const image = img.value
+    if (!image) return Promise.reject(new Error("No image loaded for export"))
+
+    const out = document.createElement("canvas")
+    let outCtx: CanvasRenderingContext2D | null
+    let renderCtx: RenderCtx
+    let scalePxPerMmForBar: number
+
+    if (opts.scope === "full") {
+        const iw = image.naturalWidth
+        const ih = image.naturalHeight
+        out.width = iw
+        out.height = ih
+        outCtx = out.getContext("2d")
+        if (!outCtx) return Promise.reject(new Error("No 2D context"))
+        outCtx.drawImage(image, 0, 0)
+
+        // Scale annotation styling so it reads the same relative to the
+        // image as on screen. The on-screen overlay canvas width is the
+        // baseline; if export is twice as wide, strokes / fonts / handles
+        // double too. Floor at 1 so a tiny overlay doesn't shrink things.
+        const overlayW = overlayRef.value?.width ?? 1
+        const strokeMul = Math.max(1, iw / Math.max(1, overlayW))
+        renderCtx = {
+            scale: 1,
+            offsetX: 0,
+            offsetY: 0,
+            strokeMul,
+            drawHandles: false,
+            drawSelectionDecorations: false,
+        }
+        scalePxPerMmForBar = props.scalePxPerMm
+    } else {
+        // View export: canvas matches the visible overlay; transform is
+        // the live one so what's drawn is exactly what the user sees.
+        const overlayW = overlayRef.value?.width ?? 1
+        const overlayH = overlayRef.value?.height ?? 1
+        out.width = overlayW
+        out.height = overlayH
+        outCtx = out.getContext("2d")
+        if (!outCtx) return Promise.reject(new Error("No 2D context"))
+        // Draw image at the live view transform — same affine the live
+        // canvasRef is using.
+        outCtx.save()
+        outCtx.translate(viewOffsetX.value, viewOffsetY.value)
+        outCtx.scale(viewScale.value, viewScale.value)
+        outCtx.drawImage(image, 0, 0)
+        outCtx.restore()
+        renderCtx = {
+            scale: viewScale.value,
+            offsetX: viewOffsetX.value,
+            offsetY: viewOffsetY.value,
+            strokeMul: 1,
+            drawHandles: false,
+            drawSelectionDecorations: false,
+        }
+        // Effective canvas px per mm = image px per mm × CSS scale, since
+        // the image is being painted at viewScale into the canvas.
+        scalePxPerMmForBar = props.scalePxPerMm * viewScale.value
+    }
+
+    // Draw every measurement, no selection distinction.
+    for (const m of measurements.value) {
+        drawMeasurement(outCtx, m, false, renderCtx)
+    }
+
+    if (opts.includeScaleBar) {
+        const withBar = appendScaleBarCanvas(out, scalePxPerMmForBar)
+        return canvasToBlob(withBar)
+    }
+    return canvasToBlob(out)
+}
+
+defineExpose({ exportWithScaleBar, exportWithMeasurements })
 
 let resizeObs: ResizeObserver | null = null
 
 onMounted(() => {
+    seedFromCache()
     loadImg()
     if (containerRef.value) {
         resizeObs = new ResizeObserver(() => {
@@ -1674,10 +2020,27 @@ onUnmounted(() => {
     detachWindowDragListeners()
 })
 
-watch(() => props.imageUrl, loadImg)
+watch(() => props.imageUrl, () => {
+    // A new image (or the same image with a new object URL) means we should
+    // re-seed from cache before triggering the redraw chain.
+    seedFromCache()
+    loadImg()
+})
 watch(showGrid, () => { drawOverlay() })
 watch(gridSpacingMm, () => { drawOverlay() })
 watch(() => props.scalePxPerMm, () => { drawOverlay() })
+
+// Persist on every measurement mutation. localStorage writes are cheap at
+// this scale; mirrors how DatumEditor.vue persists store.datums.
+watch(
+    measurements,
+    (next) => {
+        if (store.fileHash) {
+            saveMeasurements(store.fileHash, next)
+        }
+    },
+    { deep: true },
+)
 </script>
 
 <template>
@@ -1734,6 +2097,30 @@ watch(() => props.scalePxPerMm, () => { drawOverlay() })
                         <ellipse cx="12" cy="12" rx="9" ry="6" />
                     </svg>
                     Ellipse
+                </button>
+                <button
+                    class="inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors"
+                    :class="
+                        activeTool === 'circle'
+                            ? 'bg-primary/10 text-primary'
+                            : 'text-muted-foreground hover:text-foreground'
+                    "
+                    @click="setTool('circle')"
+                >
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                    >
+                        <circle cx="12" cy="12" r="8" />
+                    </svg>
+                    Circle
                 </button>
                 <button
                     class="inline-flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium transition-colors"
