@@ -57,7 +57,9 @@ watch(scaleInput, (v) => {
     }
 })
 
-const MAX_AUTO_SCALE_DIM = 8192
+/** Max dimension (px) of the auto-suggested output. Picked so default
+ *  exports stay under a few MB and OpenCV's WASM doesn't choke. */
+const AUTO_SCALE_TARGET_DIM = 2000
 
 /** Estimate the image-pixels-per-mm implied by a single datum. Picks the
  *  best datum by type priority (rect > line > ellipse) and then confidence.
@@ -123,16 +125,16 @@ function computeAutoScale(): number {
     const ref = pickScaleRef()
     if (!img || !ref || ref.srcPxPerMm <= 0) return DEFAULT_SCALE_PX_PER_MM
 
-    let autoScale = ref.srcPxPerMm
-
-    // Clamp so the full output doesn't exceed MAX_AUTO_SCALE_DIM
-    const estMax = Math.max(img.naturalWidth, img.naturalHeight)
-    if (estMax > MAX_AUTO_SCALE_DIM) {
-        autoScale *= MAX_AUTO_SCALE_DIM / estMax
-    }
-
-    // The scale input is integer-only; floor so the shown value round-trips.
-    return Math.max(1, Math.floor(autoScale))
+    // The full warped output is roughly the source image scaled by
+    // (outputPxPerMm / srcPxPerMm). Pick outputPxPerMm so the larger of
+    // the two output dimensions lands at AUTO_SCALE_TARGET_DIM; floor so
+    // the shown value round-trips through the integer-only input; clamp
+    // at 1 to avoid useless 0 px/mm.
+    const imgMaxDim = Math.max(img.naturalWidth, img.naturalHeight)
+    if (imgMaxDim <= 0) return DEFAULT_SCALE_PX_PER_MM
+    const target =
+        (AUTO_SCALE_TARGET_DIM * ref.srcPxPerMm) / imgMaxDim
+    return Math.max(1, Math.floor(target))
 }
 
 onMounted(() => {
