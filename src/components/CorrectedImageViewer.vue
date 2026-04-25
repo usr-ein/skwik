@@ -1163,24 +1163,44 @@ function applyDrag(
             if (handleKey === "a") return { ...original, a: { x: original.a.x + dx, y: original.a.y + dy } }
             if (handleKey === "b") return { ...original, b: { x: original.b.x + dx, y: original.b.y + dy } }
         } else if (original.type === "rectangle") {
-            // Per spec: dragging an individual corner only moves that corner —
-            // the rect can become non-rectangular. The array index stays
-            // stable so TL/TR/BR/BL labels don't shift.
+            // Constrain to an axis-aligned rectangle: the dragged corner
+            // follows the cursor, the diagonally-opposite corner stays put,
+            // and the two adjacent corners are recomputed from the cross of
+            // (dragged.x, opp.y) and (opp.x, dragged.y) so the shape stays
+            // rectangular. Corner indices stay stable — c0 is still the
+            // logical TL even if the box flips through itself.
             const cornerIdx: 0 | 1 | 2 | 3 | null =
                 handleKey === "c0" ? 0 :
                 handleKey === "c1" ? 1 :
                 handleKey === "c2" ? 2 :
                 handleKey === "c3" ? 3 : null
             if (cornerIdx !== null) {
-                const next: [Point, Point, Point, Point] = [
-                    { ...original.corners[0] },
-                    { ...original.corners[1] },
-                    { ...original.corners[2] },
-                    { ...original.corners[3] },
-                ]
-                next[cornerIdx] = {
+                const moving = {
                     x: original.corners[cornerIdx].x + dx,
                     y: original.corners[cornerIdx].y + dy,
+                }
+                const oppIdx = ((cornerIdx + 2) % 4) as 0 | 1 | 2 | 3
+                const opp = { ...original.corners[oppIdx] }
+                const next: [Point, Point, Point, Point] = [
+                    { x: 0, y: 0 },
+                    { x: 0, y: 0 },
+                    { x: 0, y: 0 },
+                    { x: 0, y: 0 },
+                ]
+                next[cornerIdx] = moving
+                next[oppIdx] = opp
+                if (cornerIdx === 0 || cornerIdx === 2) {
+                    // TL ↔ BR diagonal: TR=(BR.x, TL.y), BL=(TL.x, BR.y).
+                    const tl = next[0]
+                    const br = next[2]
+                    next[1] = { x: br.x, y: tl.y }
+                    next[3] = { x: tl.x, y: br.y }
+                } else {
+                    // TR ↔ BL diagonal: TL=(BL.x, TR.y), BR=(TR.x, BL.y).
+                    const tr = next[1]
+                    const bl = next[3]
+                    next[0] = { x: bl.x, y: tr.y }
+                    next[2] = { x: tr.x, y: bl.y }
                 }
                 return { ...original, corners: next }
             }
