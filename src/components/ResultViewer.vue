@@ -806,20 +806,25 @@ async function download() {
                 </CardContent>
             </Card>
 
-            <!-- Corrected image with tools -->
-            <Card>
-                <CardHeader>
-                    <CardTitle class="text-base"
-                        >Corrected Image</CardTitle
-                    >
-                </CardHeader>
-                <CardContent>
-                    <CorrectedImageViewer
-                        :image-url="resultUrl"
-                        :scale-px-per-mm="store.scalePxPerMm"
-                    />
-                </CardContent>
-            </Card>
+            <!-- Corrected image with tools — full-bleed to use the whole page width
+                 even though the surrounding column is capped at max-w-4xl. -->
+            <div
+                class="relative left-1/2 w-screen -translate-x-1/2 px-4"
+            >
+                <Card>
+                    <CardHeader>
+                        <CardTitle class="text-base"
+                            >Corrected Image</CardTitle
+                        >
+                    </CardHeader>
+                    <CardContent>
+                        <CorrectedImageViewer
+                            :image-url="resultUrl"
+                            :scale-px-per-mm="store.scalePxPerMm"
+                        />
+                    </CardContent>
+                </Card>
+            </div>
 
             <!-- Download -->
             <div class="flex flex-col items-center gap-3 pb-8">
