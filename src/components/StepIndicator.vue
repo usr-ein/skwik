@@ -9,7 +9,8 @@ const steps: { num: AppStep; label: string }[] = [
     { num: 1, label: "Upload" },
     { num: 2, label: "EXIF" },
     { num: 3, label: "Datums" },
-    { num: 4, label: "Result" },
+    { num: 4, label: "Deskew" },
+    { num: 5, label: "Measure" },
 ]
 
 function isReachable(num: AppStep): boolean {

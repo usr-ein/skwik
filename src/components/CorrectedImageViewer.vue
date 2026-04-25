@@ -2085,7 +2085,7 @@ function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
 }
 
 // Legacy export: bare image + scale bar, no measurements. Preserved as-is
-// for any caller still wired to it (currently none — ResultViewer's
+// for any caller still wired to it (currently none — MeasureViewer's
 // addScaleBar handles the no-measurements case directly).
 function exportWithScaleBar(): Promise<Blob> {
     const image = img.value
@@ -2441,9 +2441,10 @@ watch(
             </span>
         </div>
 
-        <!-- Canvas + side list. The parent ResultViewer clamps width to
-             max-w-4xl; widening the canvas beyond that requires a parent
-             change (see ResultViewer.vue root container). -->
+        <!-- Canvas + side list. Width is dictated by the parent — when
+             rendered inside MeasureViewer the surrounding container spans
+             the full viewport width; inside DeskewViewer it is capped at
+             the standard step width. -->
         <div class="grid gap-3 md:grid-cols-[1fr_220px]">
             <div
                 ref="containerRef"

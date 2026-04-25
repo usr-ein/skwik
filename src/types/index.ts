@@ -114,7 +114,7 @@ export interface DeskewResult {
     diagnostics: DeskewDiagnostics
 }
 
-export type AppStep = 1 | 2 | 3 | 4
+export type AppStep = 1 | 2 | 3 | 4 | 5
 
 /** Pixels per mm in the output image. Default 10 (= 100 px/cm). */
 export const DEFAULT_SCALE_PX_PER_MM = 10

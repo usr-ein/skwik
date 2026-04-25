@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue"
+import { ref, computed, onMounted, onUnmounted, watch } from "vue"
 import { useAppStore } from "@/stores/app"
 import { deskewImage, waitForOpenCV } from "@/lib/deskew"
 import type { Datum } from "@/types"
@@ -8,12 +8,6 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
-import {
-    Tooltip,
-    TooltipContent,
-    TooltipProvider,
-    TooltipTrigger,
-} from "@/components/ui/tooltip"
 import {
     Card,
     CardContent,
@@ -30,30 +24,20 @@ import {
     TableHeader,
     TableRow,
 } from "@/components/ui/table"
-import CorrectedImageViewer from "@/components/CorrectedImageViewer.vue"
-// `defineExpose` in CorrectedImageViewer makes these methods available on
-// the template ref, but Vue's ComponentPublicInstance type doesn't surface
-// them automatically — we type the ref explicitly so the call is checked.
-type CorrectedImageViewerRef = InstanceType<typeof CorrectedImageViewer> & {
-    exportWithMeasurements: (opts: {
-        scope: "full" | "view"
-        includeScaleBar: boolean
-    }) => Promise<Blob>
-}
+import { loadSettings } from "@/lib/settings-cache"
 import {
-    loadSettings,
-    saveSettings,
-} from "@/lib/settings-cache"
+    loadMeasurements,
+    saveMeasurements,
+    scaleMeasurements,
+} from "@/lib/measurement-cache"
 
 const store = useAppStore()
-const resultUrl = ref<string | null>(null)
-const viewerRef = ref<CorrectedImageViewerRef | null>(null)
+const previewUrl = ref<string | null>(null)
 const error = ref("")
 const hasRun = ref(false)
 const cvReady = ref(false)
 const cvLoading = ref(false)
 const showAlgoDetails = ref(false)
-const includeScaleBar = ref(false)
 const scaleInput = ref(String(store.scalePxPerMm))
 const scaleValid = computed(() => {
     const n = Number(scaleInput.value)
@@ -149,29 +133,28 @@ function computeAutoScale(): number {
 
 onMounted(() => {
     const cached = loadSettings()
-    if (cached) {
-        includeScaleBar.value = cached.includeScaleBar
+    if (cached && cached.scalePxPerMm !== DEFAULT_SCALE_PX_PER_MM) {
         // Only use cached scale if it was explicitly set before
-        if (cached.scalePxPerMm !== DEFAULT_SCALE_PX_PER_MM) {
-            scaleInput.value = String(cached.scalePxPerMm)
-            return
-        }
+        scaleInput.value = String(cached.scalePxPerMm)
+    } else {
+        // Auto-compute a sensible default scale
+        const auto = computeAutoScale()
+        store.scalePxPerMm = auto
+        scaleInput.value = String(auto)
     }
-    // Auto-compute a sensible default scale
-    const auto = computeAutoScale()
-    store.scalePxPerMm = auto
-    scaleInput.value = String(auto)
+    // Re-create the preview URL if a deskew result is already cached on the
+    // store (e.g. user navigated back from Measure).
+    if (store.deskewResult) {
+        previewUrl.value = URL.createObjectURL(
+            store.deskewResult.correctedImageBlob,
+        )
+        hasRun.value = true
+    }
 })
 
-watch(
-    [() => store.scalePxPerMm, includeScaleBar],
-    () => {
-        saveSettings({
-            scalePxPerMm: store.scalePxPerMm,
-            includeScaleBar: includeScaleBar.value,
-        })
-    },
-)
+onUnmounted(() => {
+    if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+})
 
 // Progress tracking
 const progressStep = ref(0)
@@ -234,11 +217,14 @@ async function runDeskew() {
             requestAnimationFrame(r)
         })
 
+        const newScale = store.scalePxPerMm
+        const oldScale = store.lastDeskewScale
+
         const result = await deskewImage({
             image: store.loadedImage,
             datums: store.datums,
             exif: store.exifData,
-            scalePxPerMm: store.scalePxPerMm,
+            scalePxPerMm: newScale,
             onProgress: (step, total, label) => {
                 progressStep.value = step
                 progressTotal.value = total
@@ -247,10 +233,28 @@ async function runDeskew() {
             },
         })
 
-        store.setResult(result)
+        // If the user changed the output scale between runs, the new
+        // corrected image is a different size — rescale any measurements
+        // already cached for this image so they stay anchored to the same
+        // physical features. CorrectedImageViewer reads from cache on
+        // mount, so writing here is enough; no in-memory state to sync.
+        if (
+            oldScale !== null &&
+            oldScale > 0 &&
+            oldScale !== newScale &&
+            store.fileHash
+        ) {
+            const cached = loadMeasurements(store.fileHash)
+            if (cached && cached.length > 0) {
+                const scaled = scaleMeasurements(cached, newScale / oldScale)
+                saveMeasurements(store.fileHash, scaled)
+            }
+        }
 
-        if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
-        resultUrl.value = URL.createObjectURL(result.correctedImageBlob)
+        store.setResult(result, newScale)
+
+        if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+        previewUrl.value = URL.createObjectURL(result.correctedImageBlob)
     } catch (e) {
         error.value = e instanceof Error ? e.message : "Deskew failed"
     } finally {
@@ -258,168 +262,27 @@ async function runDeskew() {
         store.processingStatus = ""
     }
 }
-
-function addScaleBar(image: HTMLImageElement): Promise<Blob> {
-    return new Promise((resolve, reject) => {
-        const iw = image.naturalWidth
-        const ih = image.naturalHeight
-        const scale = store.scalePxPerMm
-
-        const unit = Math.max(iw / 100, 8)
-        const barHeightPx = Math.round(unit * 5)
-        const canvas = document.createElement("canvas")
-        canvas.width = iw
-        canvas.height = ih + barHeightPx
-
-        const ctx = canvas.getContext("2d")
-        if (!ctx) {
-            reject(new Error("No 2D context"))
-            return
-        }
-
-        ctx.drawImage(image, 0, 0)
-
-        ctx.fillStyle = "#000"
-        ctx.fillRect(0, ih, iw, barHeightPx)
-
-        const imgWidthMm = iw / scale
-        const niceSteps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
-        const targetMm = imgWidthMm * 0.2
-        let barMm = niceSteps[0] ?? 10
-        for (const s of niceSteps) {
-            barMm = s
-            if (s >= targetMm) break
-        }
-        const barWidthPx = barMm * scale
-
-        const margin = Math.round(unit * 2)
-        const barX = margin
-        const barY = ih + barHeightPx / 2
-        const barThick = Math.max(Math.round(unit * 0.6), 4)
-        const tickH = Math.round(unit * 1.5)
-        const tickW = Math.max(2, Math.round(unit * 0.15))
-
-        ctx.fillStyle = "#fff"
-        ctx.fillRect(barX, barY - barThick / 2, barWidthPx, barThick)
-        ctx.fillRect(barX, barY - tickH / 2, tickW, tickH)
-        ctx.fillRect(
-            barX + barWidthPx - tickW,
-            barY - tickH / 2,
-            tickW,
-            tickH,
-        )
-
-        const fontSize = Math.round(unit * 1.4)
-        ctx.font = `bold ${String(fontSize)}px monospace`
-        ctx.fillStyle = "#fff"
-        ctx.textAlign = "center"
-        ctx.textBaseline = "bottom"
-        ctx.fillText(
-            `${String(barMm)} mm`,
-            barX + barWidthPx / 2,
-            barY - tickH / 2 - Math.round(unit * 0.3),
-        )
-
-        const smallFont = Math.round(unit * 1)
-        ctx.textAlign = "right"
-        ctx.textBaseline = "middle"
-        ctx.font = `${String(smallFont)}px monospace`
-        ctx.fillStyle = "rgba(255,255,255,0.6)"
-        ctx.fillText(`${String(scale)} px/mm`, iw - margin, barY)
-
-        canvas.toBlob((b) => {
-            if (b) resolve(b)
-            else reject(new Error("toBlob failed"))
-        }, "image/png")
-    })
-}
-
-async function download() {
-    if (!store.deskewResult) return
-
-    let blob: Blob = store.deskewResult.correctedImageBlob
-
-    console.log("[download] includeScaleBar =", includeScaleBar.value)
-    if (includeScaleBar.value) {
-        // Load the corrected image into an HTMLImageElement for drawing
-        const imgUrl = URL.createObjectURL(
-            store.deskewResult.correctedImageBlob,
-        )
-        try {
-            const image = await new Promise<HTMLImageElement>(
-                (resolve, reject) => {
-                    const el = new Image()
-                    el.onload = () => {
-                        resolve(el)
-                    }
-                    el.onerror = () => {
-                        reject(new Error("Failed to load image"))
-                    }
-                    el.src = imgUrl
-                },
-            )
-            blob = await addScaleBar(image)
-        } finally {
-            URL.revokeObjectURL(imgUrl)
-        }
-    }
-
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    const baseName =
-        store.originalFile?.name.replace(/\.[^.]+$/, "") ?? "output"
-    a.download = `${baseName}-skwik.png`
-    a.click()
-    URL.revokeObjectURL(url)
-}
-
-// Download the corrected image with measurement annotations baked in.
-// scope="full": natural-resolution image + overlay → `-measured.png`.
-// scope="view": current viewport (zoom/pan) + overlay → `-measured-view.png`.
-// Both honour the existing `includeScaleBar` toggle. View export's bar is
-// sized for the on-screen pixel scale (image-px/mm × CSS view scale) so it
-// represents the same physical mm length the user is actually looking at.
-async function downloadMeasured(scope: "full" | "view") {
-    const viewer = viewerRef.value
-    if (!viewer || !store.deskewResult) return
-    try {
-        const blob = await viewer.exportWithMeasurements({
-            scope,
-            includeScaleBar: includeScaleBar.value,
-        })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement("a")
-        a.href = url
-        const baseName =
-            store.originalFile?.name.replace(/\.[^.]+$/, "") ?? "output"
-        a.download =
-            scope === "full"
-                ? `${baseName}-measured.png`
-                : `${baseName}-measured-view.png`
-        a.click()
-        URL.revokeObjectURL(url)
-    } catch (e) {
-        error.value =
-            e instanceof Error ? e.message : "Measured export failed"
-    }
-}
-
 </script>
 
 <template>
     <div class="mx-auto max-w-4xl space-y-6">
-        <div class="flex items-center justify-between">
+        <div class="flex items-center justify-between gap-2">
             <div>
-                <h2 class="text-xl font-semibold">Process &amp; Download</h2>
+                <h2 class="text-xl font-semibold">Deskew</h2>
                 <p class="text-sm text-muted-foreground">
-                    Set the output scale, run perspective correction, and
-                    download.
+                    Set the output scale and run perspective correction.
                 </p>
             </div>
-            <Button variant="outline" @click="store.goToStep(3)"
-                >Back</Button
-            >
+            <div class="flex shrink-0 gap-2">
+                <Button variant="outline" @click="store.goToStep(3)"
+                    >Back</Button
+                >
+                <Button
+                    :disabled="!store.canProceedToStep5"
+                    @click="store.goToStep(5)"
+                    >Next: Measure</Button
+                >
+            </div>
         </div>
 
         <!-- Scale setting -->
@@ -510,7 +373,7 @@ async function downloadMeasured(scope: "full" | "view") {
                         {{ datum.label }}
                         <span class="ml-1 font-mono text-xs">{{
                             datum.type === "rectangle"
-                                ? `${datum.widthMm}\u00D7${datum.heightMm}mm`
+                                ? `${datum.widthMm}×${datum.heightMm}mm`
                                 : datum.type === "line"
                                   ? `${datum.lengthMm}mm`
                                   : `⌀${datum.diameterMm}mm`
@@ -594,7 +457,7 @@ async function downloadMeasured(scope: "full" | "view") {
         </p>
 
         <!-- Result -->
-        <template v-if="store.deskewResult && resultUrl">
+        <template v-if="store.deskewResult && previewUrl">
             <!-- Diagnostics -->
             <Card>
                 <CardHeader>
@@ -847,173 +710,49 @@ async function downloadMeasured(scope: "full" | "view") {
                 </CardContent>
             </Card>
 
-            <!-- Corrected image with tools — full-bleed to use the whole page width
-                 even though the surrounding column is capped at max-w-4xl. -->
-            <div
-                class="relative left-1/2 w-screen -translate-x-1/2 px-4"
-            >
-                <Card>
-                    <CardHeader>
-                        <CardTitle class="text-base"
-                            >Corrected Image</CardTitle
-                        >
-                    </CardHeader>
-                    <CardContent>
-                        <CorrectedImageViewer
-                            ref="viewerRef"
-                            :image-url="resultUrl"
-                            :scale-px-per-mm="store.scalePxPerMm"
-                        />
-                    </CardContent>
-                </Card>
-            </div>
-
-            <!-- Download -->
-            <div class="flex flex-col items-center gap-3 pb-8">
-                <TooltipProvider>
-                    <Tooltip>
-                        <TooltipTrigger as-child>
-                            <label
-                                class="flex cursor-pointer items-center gap-2 select-none"
-                            >
-                                <input
-                                    v-model="includeScaleBar"
-                                    type="checkbox"
-                                    class="h-4 w-4 accent-primary"
-                                />
-                                <span
-                                    class="text-sm text-muted-foreground"
-                                    >Include scale bar in export</span
-                                >
-                            </label>
-                        </TooltipTrigger>
-                        <TooltipContent side="top" class="max-w-xs">
-                            Appends a black bar at the bottom of the
-                            exported image with a measurement scale and
-                            px/mm annotation.
-                        </TooltipContent>
-                    </Tooltip>
-                </TooltipProvider>
-                <div class="flex flex-wrap items-center justify-center gap-3">
-                    <Button size="lg" @click="download">
-                        <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="18"
-                            height="18"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            class="mr-2"
-                        >
-                            <path
-                                d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"
-                            />
-                            <polyline points="7 10 12 15 17 10" />
-                            <line
-                                x1="12"
-                                x2="12"
-                                y1="15"
-                                y2="3"
-                            />
-                        </svg>
-                        Download PNG
-                    </Button>
-                    <TooltipProvider>
-                        <Tooltip>
-                            <TooltipTrigger as-child>
-                                <Button
-                                    size="lg"
-                                    variant="secondary"
-                                    @click="downloadMeasured('full')"
-                                >
-                                    <svg
-                                        xmlns="http://www.w3.org/2000/svg"
-                                        width="18"
-                                        height="18"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                        class="mr-2"
-                                    >
-                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                                        <polyline points="7 10 12 15 17 10" />
-                                        <line x1="12" x2="12" y1="15" y2="3" />
-                                        <path d="M3 3h6" />
-                                    </svg>
-                                    Download full + measurements
-                                </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top" class="max-w-xs">
-                                Source image at full resolution with every
-                                measurement (lines, rectangles, ellipses,
-                                angles) and labels rendered on top.
-                            </TooltipContent>
-                        </Tooltip>
-                    </TooltipProvider>
-                    <TooltipProvider>
-                        <Tooltip>
-                            <TooltipTrigger as-child>
-                                <Button
-                                    size="lg"
-                                    variant="secondary"
-                                    @click="downloadMeasured('view')"
-                                >
-                                    <svg
-                                        xmlns="http://www.w3.org/2000/svg"
-                                        width="18"
-                                        height="18"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                        class="mr-2"
-                                    >
-                                        <rect x="3" y="3" width="18" height="18" rx="2" />
-                                        <path d="M9 9h6v6H9z" />
-                                    </svg>
-                                    Download view + measurements
-                                </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top" class="max-w-xs">
-                                Captures exactly what's visible in the
-                                viewer (current zoom and pan) with every
-                                measurement rendered on top.
-                            </TooltipContent>
-                        </Tooltip>
-                    </TooltipProvider>
-                    <Button
-                        size="lg"
-                        variant="outline"
-                        @click="store.reset()"
+            <!-- Deskewed preview -->
+            <Card>
+                <CardHeader>
+                    <CardTitle class="text-base"
+                        >Deskewed Preview</CardTitle
                     >
-                        Process New Image
-                    </Button>
-                </div>
-                <p
-                    class="font-mono text-sm text-muted-foreground"
-                >
-                    {{
-                        store.deskewResult.diagnostics.outputWidthPx
-                    }}&times;{{
-                        store.deskewResult.diagnostics.outputHeightPx
-                    }} px &mdash;
-                    {{
-                        (
-                            store.deskewResult
-                                .correctedImageBlob.size /
-                            1024 /
-                            1024
-                        ).toFixed(1)
-                    }} MB
-                </p>
+                    <CardDescription>
+                        Continue to <strong>Measure</strong> to add
+                        annotations and download.
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div
+                        class="flex items-center justify-center overflow-hidden rounded-md bg-muted"
+                    >
+                        <img
+                            :src="previewUrl"
+                            alt="Deskewed image preview"
+                            class="max-h-[480px] w-full object-contain"
+                        />
+                    </div>
+                </CardContent>
+            </Card>
+
+            <div class="flex justify-center pb-8">
+                <Button size="lg" @click="store.goToStep(5)">
+                    Continue to Measure
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="18"
+                        height="18"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        class="ml-2"
+                    >
+                        <path d="M5 12h14" />
+                        <path d="m12 5 7 7-7 7" />
+                    </svg>
+                </Button>
             </div>
         </template>
     </div>

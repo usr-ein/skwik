@@ -4,7 +4,8 @@ import StepIndicator from "@/components/StepIndicator.vue"
 import ImageUpload from "@/components/ImageUpload.vue"
 import ExifViewer from "@/components/ExifViewer.vue"
 import DatumEditor from "@/components/DatumEditor.vue"
-import ResultViewer from "@/components/ResultViewer.vue"
+import DeskewViewer from "@/components/DeskewViewer.vue"
+import MeasureViewer from "@/components/MeasureViewer.vue"
 import ThemeToggle from "@/components/ThemeToggle.vue"
 import SkwikLogo from "@/components/SkwikLogo.vue"
 
@@ -50,15 +51,19 @@ const store = useAppStore()
             </div>
         </header>
 
-        <main class="mx-auto max-w-7xl px-4 py-6">
+        <!-- Bottom padding clears the fixed footer so content never sits
+             underneath it. Footer height ≈ py-3 + 1lh ≈ 2.5rem; add a
+             small buffer. -->
+        <main class="mx-auto max-w-7xl px-4 pb-16 pt-6">
             <ImageUpload v-if="store.currentStep === 1" />
             <ExifViewer v-else-if="store.currentStep === 2" />
             <DatumEditor v-else-if="store.currentStep === 3" />
-            <ResultViewer v-else-if="store.currentStep === 4" />
+            <DeskewViewer v-else-if="store.currentStep === 4" />
+            <MeasureViewer v-else-if="store.currentStep === 5" />
         </main>
 
         <footer
-            class="border-t border-border/50 py-4 text-center text-xs text-muted-foreground"
+            class="fixed inset-x-0 bottom-0 z-40 border-t border-border/50 bg-background/95 py-3 text-center text-xs text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-background/60"
         >
             Made by
             <a

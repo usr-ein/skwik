@@ -23,6 +23,10 @@ export const useAppStore = defineStore("app", () => {
     )
     const fileHash = ref<string | null>(null)
     const cacheRestoreMessage = ref("")
+    /** Output px/mm of the current `deskewResult`. Set whenever a deskew
+     *  produces a new result; consumers compare against the live
+     *  `scalePxPerMm` to detect when measurements need to be rescaled. */
+    const lastDeskewScale = ref<number | null>(null)
 
     const canProceedToStep2 = computed(() => loadedImage.value !== null)
     const canProceedToStep3 = computed(() => canProceedToStep2.value)
@@ -34,6 +38,9 @@ export const useAppStore = defineStore("app", () => {
             return d.diameterMm > 0
         })
     })
+    const canProceedToStep5 = computed(
+        () => canProceedToStep4.value && deskewResult.value !== null,
+    )
 
     function setImage(file: File, image: HTMLImageElement) {
         originalFile.value = file
@@ -141,8 +148,9 @@ export const useAppStore = defineStore("app", () => {
         }
     }
 
-    function setResult(result: DeskewResult) {
+    function setResult(result: DeskewResult, scalePxPerMmUsed: number) {
         deskewResult.value = result
+        lastDeskewScale.value = scalePxPerMmUsed
     }
 
     function setFileHash(hash: string) {
@@ -163,6 +171,7 @@ export const useAppStore = defineStore("app", () => {
         scalePxPerMm.value = DEFAULT_SCALE_PX_PER_MM
         fileHash.value = null
         cacheRestoreMessage.value = ""
+        lastDeskewScale.value = null
     }
 
     return {
@@ -179,9 +188,11 @@ export const useAppStore = defineStore("app", () => {
         scalePxPerMm,
         fileHash,
         cacheRestoreMessage,
+        lastDeskewScale,
         canProceedToStep2,
         canProceedToStep3,
         canProceedToStep4,
+        canProceedToStep5,
         setImage,
         setExif,
         goToStep,
