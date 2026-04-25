@@ -211,14 +211,40 @@ async function downloadMeasured(scope: "full" | "view") {
     <!-- Break out of <main>'s max-w-7xl so the Measure step spans the full
          viewport width — annotation work benefits from the extra room. -->
     <div class="relative left-1/2 w-screen -translate-x-1/2 space-y-4 px-4">
-        <!-- Top header with downloads + back -->
+        <div>
+            <h2 class="text-xl font-semibold">Measure</h2>
+            <p class="text-sm text-muted-foreground">
+                Annotate the corrected image and download.
+            </p>
+        </div>
+
+        <!-- Toolbar row: Back arrow on far left, downloads in the middle,
+             "Start over" zone (dashed New Image) on the far right. -->
         <div class="flex flex-wrap items-center justify-between gap-3">
-            <div>
-                <h2 class="text-xl font-semibold">Measure</h2>
-                <p class="text-sm text-muted-foreground">
-                    Annotate the corrected image and download.
-                </p>
-            </div>
+            <Button
+                variant="ghost"
+                size="icon"
+                class="shrink-0"
+                aria-label="Back to Deskew"
+                title="Back to Deskew"
+                @click="store.goToStep(4)"
+            >
+                <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
+                    <path d="M19 12H5" />
+                    <path d="m12 19-7-7 7-7" />
+                </svg>
+            </Button>
+
             <div class="flex flex-wrap items-center gap-3">
                 <TooltipProvider>
                     <Tooltip>
@@ -245,14 +271,6 @@ async function downloadMeasured(scope: "full" | "view") {
                     </Tooltip>
                 </TooltipProvider>
                 <div class="mx-1 h-6 w-px bg-border" />
-                <Button variant="outline" @click="store.goToStep(4)"
-                    >Back</Button
-                >
-                <Button
-                    variant="outline"
-                    @click="store.reset()"
-                    >New Image</Button
-                >
                 <Button @click="download">
                     <svg
                         xmlns="http://www.w3.org/2000/svg"
@@ -348,6 +366,24 @@ async function downloadMeasured(scope: "full" | "view") {
                         </TooltipContent>
                     </Tooltip>
                 </TooltipProvider>
+            </div>
+
+            <!-- "Start over" zone: separator + label make it visually
+                 distinct from the action buttons; dashed/transparent
+                 styling on the button itself adds friction so it isn't
+                 mis-clicked while reaching for a download. -->
+            <div class="flex items-center gap-3">
+                <div class="h-6 w-px bg-border" />
+                <span
+                    class="text-xs font-medium uppercase tracking-wider text-muted-foreground/70"
+                    >Start over</span
+                >
+                <Button
+                    variant="outline"
+                    class="border-dashed bg-transparent text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                    @click="store.reset()"
+                    >New Image</Button
+                >
             </div>
         </div>
 
