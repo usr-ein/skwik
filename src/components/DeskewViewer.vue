@@ -30,6 +30,8 @@ import {
     saveMeasurements,
     scaleMeasurements,
 } from "@/lib/measurement-cache"
+import { patchUpload } from "@/lib/upload-cache"
+import { clearZoom } from "@/lib/zoom-cache"
 
 const store = useAppStore()
 const previewUrl = ref<string | null>(null)
@@ -238,6 +240,9 @@ async function runDeskew() {
         // already cached for this image so they stay anchored to the same
         // physical features. CorrectedImageViewer reads from cache on
         // mount, so writing here is enough; no in-memory state to sync.
+        // The cached zoom/pan also no longer makes sense once the image
+        // dimensions change, so we drop it and let fitToContainer pick
+        // a fresh default.
         if (
             oldScale !== null &&
             oldScale > 0 &&
@@ -249,12 +254,28 @@ async function runDeskew() {
                 const scaled = scaleMeasurements(cached, newScale / oldScale)
                 saveMeasurements(store.fileHash, scaled)
             }
+            clearZoom(store.fileHash)
         }
 
         store.setResult(result, newScale)
 
         if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
         previewUrl.value = URL.createObjectURL(result.correctedImageBlob)
+
+        // Persist the deskew artefacts onto the upload record so the
+        // Recent Uploads gallery can reopen straight into Measure. Best
+        // effort: an IndexedDB failure shouldn't break the visible flow.
+        if (store.fileHash) {
+            try {
+                await patchUpload(store.fileHash, {
+                    correctedBlob: result.correctedImageBlob,
+                    diagnostics: result.diagnostics,
+                    scalePxPerMm: newScale,
+                })
+            } catch {
+                // ignore — gallery just won't include this entry
+            }
+        }
     } catch (e) {
         error.value = e instanceof Error ? e.message : "Deskew failed"
     } finally {

@@ -1,11 +1,23 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue"
+import { ref, computed, onMounted, onUnmounted } from "vue"
 import { useAppStore } from "@/stores/app"
 import { loadImage } from "@/lib/image-loader"
 import { extractExif } from "@/lib/exif"
 import { hashFile } from "@/lib/file-hash"
 import { loadDatums, clearCache, getCacheSize } from "@/lib/datum-cache"
-import { clearCache as clearMeasurementCache } from "@/lib/measurement-cache"
+import {
+    clearCache as clearMeasurementCache,
+    loadMeasurements,
+} from "@/lib/measurement-cache"
+import {
+    saveUpload,
+    loadUpload,
+    listUploads,
+    deleteUpload,
+    clearUploads,
+    type UploadRecord,
+} from "@/lib/upload-cache"
+import { clearCache as clearZoomCache } from "@/lib/zoom-cache"
 import {
     Card,
     CardContent,
@@ -22,6 +34,8 @@ const error = ref("")
 const fileInput = ref<HTMLInputElement | null>(null)
 const cacheCount = ref(0)
 const confirmingClear = ref(false)
+const recentUploads = ref<UploadRecord[]>([])
+const recentUrls = ref<Map<string, string>>(new Map())
 
 const ACCEPTED = "image/*,.heic,.heif"
 // Auto-revert the "Are you sure?" prompt after this long of inactivity
@@ -30,18 +44,73 @@ const CLEAR_CONFIRM_TIMEOUT_MS = 4000
 
 let confirmTimer: ReturnType<typeof setTimeout> | null = null
 
-onMounted(() => {
+const dateFormatter = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+})
+
+// Only show entries that have a deskew result — those are the ones a
+// click can meaningfully drop the user back into Measure with. Uploads
+// that never reached deskew remain saved (so re-uploading the same file
+// still hits the cache) but don't clutter the gallery.
+const completedUploads = computed(() =>
+    recentUploads.value.filter(
+        (u) => u.correctedBlob !== undefined && u.diagnostics !== undefined,
+    ),
+)
+
+onMounted(async () => {
     cacheCount.value = getCacheSize()
+    await refreshRecentUploads()
 })
 
 onUnmounted(() => {
     if (confirmTimer) clearTimeout(confirmTimer)
+    for (const url of recentUrls.value.values()) URL.revokeObjectURL(url)
 })
+
+async function refreshRecentUploads() {
+    try {
+        const all = await listUploads()
+        // Revoke any URLs whose entries no longer exist (e.g. after a
+        // delete) before refreshing the map.
+        const nextHashes = new Set(all.map((u) => u.hash))
+        for (const [hash, url] of recentUrls.value) {
+            if (!nextHashes.has(hash)) {
+                URL.revokeObjectURL(url)
+                recentUrls.value.delete(hash)
+            }
+        }
+        // Mint preview URLs for every entry; we keep them alive for the
+        // lifetime of this page mount (revoked in onUnmounted).
+        for (const u of all) {
+            if (!recentUrls.value.has(u.hash)) {
+                const preview = u.correctedBlob ?? u.originalBlob
+                recentUrls.value.set(u.hash, URL.createObjectURL(preview))
+            }
+        }
+        recentUploads.value = all
+    } catch {
+        recentUploads.value = []
+    }
+}
+
+function formatDate(ms: number): string {
+    return dateFormatter.format(new Date(ms))
+}
+
+function previewUrlFor(hash: string): string {
+    return recentUrls.value.get(hash) ?? ""
+}
 
 function handleClearCacheClick() {
     if (confirmingClear.value) {
         clearCache()
         clearMeasurementCache()
+        clearZoomCache()
+        // IndexedDB clear is async but the UI doesn't depend on its
+        // completion — fire and forget, then reload the gallery.
+        void clearUploads().then(() => refreshRecentUploads())
         cacheCount.value = 0
         confirmingClear.value = false
         if (confirmTimer) {
@@ -56,6 +125,90 @@ function handleClearCacheClick() {
         confirmingClear.value = false
         confirmTimer = null
     }, CLEAR_CONFIRM_TIMEOUT_MS)
+}
+
+async function handleDeleteUpload(hash: string, ev: Event) {
+    ev.stopPropagation()
+    try {
+        await deleteUpload(hash)
+        await refreshRecentUploads()
+    } catch {
+        // ignore — UI will reflect on next refresh
+    }
+}
+
+// Reopen a past upload straight in Measure. Replays the upload pipeline
+// from the cached blob (the original image is needed if the user later
+// goes back to Datums or Deskew), then stitches the cached deskew
+// artefacts and datums onto the store before navigating.
+async function restoreUpload(hash: string) {
+    error.value = ""
+    store.isProcessing = true
+    store.processingStatus = "Loading saved image..."
+
+    try {
+        const record = await loadUpload(hash)
+        if (!record) {
+            error.value = "Saved upload no longer available"
+            return
+        }
+        if (!record.correctedBlob || !record.diagnostics) {
+            error.value = "Saved upload has no deskew result"
+            return
+        }
+        const file = new File([record.originalBlob], record.filename, {
+            type: record.mimeType,
+        })
+        const { image, convertedFile } = await loadImage(file, (status) => {
+            store.processingStatus = status
+        })
+
+        const cachedDatums = loadDatums(hash) ?? []
+        const cachedMeasurements = loadMeasurements(hash) ?? []
+
+        store.setFileHash(hash)
+        store.setImage(convertedFile, image)
+        store.setExif(record.exif)
+        store.datums = cachedDatums
+        if (record.scalePxPerMm) {
+            store.scalePxPerMm = record.scalePxPerMm
+        }
+        store.setResult(
+            {
+                correctedImageBlob: record.correctedBlob,
+                diagnostics: record.diagnostics,
+            },
+            record.scalePxPerMm ?? store.scalePxPerMm,
+        )
+
+        if (cachedMeasurements.length > 0 || cachedDatums.length > 0) {
+            const parts: string[] = []
+            if (cachedDatums.length > 0) {
+                parts.push(
+                    `${String(cachedDatums.length)} datum${cachedDatums.length === 1 ? "" : "s"}`,
+                )
+            }
+            if (cachedMeasurements.length > 0) {
+                parts.push(
+                    `${String(cachedMeasurements.length)} measurement${cachedMeasurements.length === 1 ? "" : "s"}`,
+                )
+            }
+            store.cacheRestoreMessage = `Restored ${parts.join(" and ")}`
+            setTimeout(() => {
+                store.cacheRestoreMessage = ""
+            }, 4000)
+        }
+
+        // Bump max step so the indicator surfaces every prior step as
+        // navigable, just like a freshly-completed run would.
+        store.goToStep(5)
+    } catch (e) {
+        error.value =
+            e instanceof Error ? e.message : "Failed to reopen image"
+    } finally {
+        store.isProcessing = false
+        store.processingStatus = ""
+    }
 }
 
 async function handleFile(file: File) {
@@ -87,6 +240,27 @@ async function handleFile(file: File) {
                 store.cacheRestoreMessage = ""
             }, 4000)
         }
+
+        // Persist the upload so it shows up in the recent gallery and
+        // can be reopened later. We save the post-conversion JPEG (not
+        // the original HEIC) since that's what the rest of the app
+        // expects to load. Existing entries are merged so we keep any
+        // prior deskew artefacts attached to the same hash.
+        const existing = await loadUpload(hash).catch(() => null)
+        await saveUpload({
+            hash,
+            filename: convertedFile.name,
+            mimeType: convertedFile.type,
+            uploadedAt: existing?.uploadedAt ?? Date.now(),
+            originalBlob: convertedFile,
+            exif,
+            correctedBlob: existing?.correctedBlob,
+            diagnostics: existing?.diagnostics,
+            scalePxPerMm: existing?.scalePxPerMm,
+        }).catch(() => {
+            // IndexedDB unavailable or quota exceeded — non-fatal,
+            // gallery just won't include this upload.
+        })
 
         store.setImage(convertedFile, image)
         store.setExif(exif)
@@ -235,13 +409,75 @@ function onFileSelect(e: Event) {
                 </CardContent>
             </Card>
 
+            <!-- Recent uploads — only rendered when there's something to
+                 show. Each tile reopens the image directly into Measure
+                 with its datums, measurements, scale and last canvas
+                 zoom restored. -->
+            <section v-if="completedUploads.length > 0" class="space-y-3">
+                <p
+                    class="text-xs font-medium uppercase tracking-wider text-muted-foreground/70"
+                >
+                    Recent uploads
+                </p>
+                <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    <button
+                        v-for="upload in completedUploads"
+                        :key="upload.hash"
+                        type="button"
+                        class="group relative overflow-hidden rounded-lg border border-border bg-card text-left transition-colors hover:border-primary/60 hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                        @click="restoreUpload(upload.hash)"
+                    >
+                        <div
+                            class="aspect-video w-full overflow-hidden bg-muted"
+                        >
+                            <img
+                                :src="previewUrlFor(upload.hash)"
+                                :alt="upload.filename"
+                                class="h-full w-full object-cover transition-transform group-hover:scale-[1.02]"
+                                loading="lazy"
+                            />
+                        </div>
+                        <div class="space-y-0.5 p-2">
+                            <p class="truncate text-xs font-medium text-foreground">
+                                {{ upload.filename }}
+                            </p>
+                            <p class="truncate font-mono text-[10px] text-muted-foreground">
+                                {{ formatDate(upload.uploadedAt) }}
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            class="absolute right-1 top-1 rounded-md bg-background/80 p-1 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100 focus:opacity-100 focus:outline-none"
+                            title="Remove from recent uploads"
+                            aria-label="Remove from recent uploads"
+                            @click="(e) => handleDeleteUpload(upload.hash, e)"
+                        >
+                            <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            >
+                                <path d="M18 6 6 18" />
+                                <path d="m6 6 12 12" />
+                            </svg>
+                        </button>
+                    </button>
+                </div>
+            </section>
+
             <div class="space-y-2 text-left">
                 <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground/70">Example</p>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="space-y-1.5">
                         <img
                             src="/example-before.jpg"
-                            alt="Before: angled photograph of a Pioneer CDJ-1000MK3 top case"
+                            alt="Before: angled photograph with reference paper laid flat"
                             class="w-full rounded-md border border-border object-cover"
                         />
                         <p class="text-xs text-muted-foreground">Before &mdash; angled shot</p>
@@ -249,11 +485,19 @@ function onFileSelect(e: Event) {
                     <div class="space-y-1.5">
                         <img
                             src="/example-after.jpg"
-                            alt="After: perspective-corrected front-facing view"
+                            alt="After: perspective-corrected top-down view"
                             class="w-full rounded-md border border-border object-cover"
                         />
                         <p class="text-xs text-muted-foreground">After &mdash; corrected perspective</p>
                     </div>
+                </div>
+                <div class="space-y-1.5">
+                    <img
+                        src="/example-measured.jpg"
+                        alt="Measure: the corrected image with measurement annotations baked in"
+                        class="w-full rounded-md border border-border object-cover"
+                    />
+                    <p class="text-xs text-muted-foreground">Measured &mdash; annotations baked in</p>
                 </div>
             </div>
 

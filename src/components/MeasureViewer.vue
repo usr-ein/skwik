@@ -211,7 +211,9 @@ async function downloadMeasured(scope: "full" | "view") {
     <!-- Break out of <main>'s max-w-7xl so the Measure step spans the full
          viewport width — annotation work benefits from the extra room. -->
     <div class="relative left-1/2 w-screen -translate-x-1/2 space-y-4 px-4">
-        <div>
+        <!-- Padded right of the fork-me ribbon on desktop so the title
+             text isn't clipped underneath it. -->
+        <div class="md:pl-5">
             <h2 class="text-xl font-semibold">Measure</h2>
             <p class="text-sm text-muted-foreground">
                 Annotate the corrected image and download.
@@ -368,23 +370,15 @@ async function downloadMeasured(scope: "full" | "view") {
                 </TooltipProvider>
             </div>
 
-            <!-- "Start over" zone: separator + label make it visually
-                 distinct from the action buttons; dashed/transparent
-                 styling on the button itself adds friction so it isn't
-                 mis-clicked while reaching for a download. -->
-            <div class="flex items-center gap-3">
-                <div class="h-6 w-px bg-border" />
-                <span
-                    class="text-xs font-medium uppercase tracking-wider text-muted-foreground/70"
-                    >Start over</span
-                >
-                <Button
-                    variant="outline"
-                    class="border-dashed bg-transparent text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-                    @click="store.reset()"
-                    >New Image</Button
-                >
-            </div>
+            <!-- Dashed transparent styling marks this as a deliberate,
+                 destructive-of-state action so it isn't mis-clicked
+                 while reaching for a download. -->
+            <Button
+                variant="outline"
+                class="border-dashed bg-transparent text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                @click="store.reset()"
+                >Start Over</Button
+            >
         </div>
 
         <p v-if="error" class="text-sm text-destructive">

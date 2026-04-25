@@ -1,0 +1,158 @@
+import type { DeskewDiagnostics, ExifData } from "@/types"
+
+// Past uploads + their deskew artefacts live in IndexedDB rather than
+// localStorage because converted JPEGs routinely exceed localStorage's
+// per-origin quota (5–10MB) within a few photos. IndexedDB stores Blobs
+// natively (no base64 inflation) and tolerates GBs, which makes a
+// "recent uploads" gallery practical.
+
+const DB_NAME = "skwik-uploads"
+const DB_VERSION = 1
+const STORE_NAME = "uploads"
+
+/** All persisted state for a single past upload. Filled in two phases:
+ *  upload time captures `originalBlob` + `exif` + identity; deskew
+ *  completion adds `correctedBlob` + `diagnostics` + `scalePxPerMm` so
+ *  the upload can be re-opened straight into the Measure step. */
+export interface UploadRecord {
+    hash: string
+    filename: string
+    mimeType: string
+    uploadedAt: number
+    originalBlob: Blob
+    exif: ExifData
+    correctedBlob?: Blob
+    diagnostics?: DeskewDiagnostics
+    scalePxPerMm?: number
+}
+
+let dbPromise: Promise<IDBDatabase> | null = null
+
+function openDB(): Promise<IDBDatabase> {
+    if (dbPromise) return dbPromise
+    dbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION)
+        req.onupgradeneeded = () => {
+            const db = req.result
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                const store = db.createObjectStore(STORE_NAME, {
+                    keyPath: "hash",
+                })
+                store.createIndex("uploadedAt", "uploadedAt")
+            }
+        }
+        req.onsuccess = () => {
+            resolve(req.result)
+        }
+        req.onerror = () => {
+            dbPromise = null
+            reject(req.error ?? new Error("Failed to open uploads DB"))
+        }
+    })
+    return dbPromise
+}
+
+/** Insert or replace the record for `hash`. Re-saving with new fields
+ *  (e.g. corrected blob) overwrites the previous entry. */
+export async function saveUpload(record: UploadRecord): Promise<void> {
+    const db = await openDB()
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite")
+        const req = tx.objectStore(STORE_NAME).put(record)
+        req.onsuccess = () => {
+            resolve()
+        }
+        req.onerror = () => {
+            reject(req.error ?? new Error("Failed to save upload"))
+        }
+    })
+}
+
+/** Read the existing record (if any), apply `patch`, and persist. Used by
+ *  the Deskew step to attach deskew artefacts without losing the upload
+ *  metadata captured earlier. Returns the merged record, or null if no
+ *  record exists for `hash`. */
+export async function patchUpload(
+    hash: string,
+    patch: Partial<UploadRecord>,
+): Promise<UploadRecord | null> {
+    const existing = await loadUpload(hash)
+    if (!existing) return null
+    const merged: UploadRecord = { ...existing, ...patch, hash }
+    await saveUpload(merged)
+    return merged
+}
+
+export async function loadUpload(hash: string): Promise<UploadRecord | null> {
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly")
+        const req = tx.objectStore(STORE_NAME).get(hash)
+        req.onsuccess = () => {
+            resolve((req.result as UploadRecord | undefined) ?? null)
+        }
+        req.onerror = () => {
+            reject(req.error ?? new Error("Failed to load upload"))
+        }
+    })
+}
+
+/** All records, newest-first. Callers filter to entries with the fields
+ *  they care about (e.g. require `correctedBlob` for the gallery). */
+export async function listUploads(): Promise<UploadRecord[]> {
+    const db = await openDB()
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly")
+        const req = tx.objectStore(STORE_NAME).getAll()
+        req.onsuccess = () => {
+            const all = (req.result as UploadRecord[] | undefined) ?? []
+            all.sort((a, b) => b.uploadedAt - a.uploadedAt)
+            resolve(all)
+        }
+        req.onerror = () => {
+            reject(req.error ?? new Error("Failed to list uploads"))
+        }
+    })
+}
+
+export async function deleteUpload(hash: string): Promise<void> {
+    const db = await openDB()
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite")
+        const req = tx.objectStore(STORE_NAME).delete(hash)
+        req.onsuccess = () => {
+            resolve()
+        }
+        req.onerror = () => {
+            reject(req.error ?? new Error("Failed to delete upload"))
+        }
+    })
+}
+
+export async function clearUploads(): Promise<void> {
+    const db = await openDB()
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite")
+        const req = tx.objectStore(STORE_NAME).clear()
+        req.onsuccess = () => {
+            resolve()
+        }
+        req.onerror = () => {
+            reject(req.error ?? new Error("Failed to clear uploads"))
+        }
+    })
+}
+
+export async function countUploads(): Promise<number> {
+    const db = await openDB()
+    return new Promise<number>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly")
+        const req = tx.objectStore(STORE_NAME).count()
+        req.onsuccess = () => {
+            resolve(req.result)
+        }
+        req.onerror = () => {
+            reject(req.error ?? new Error("Failed to count uploads"))
+        }
+    })
+}

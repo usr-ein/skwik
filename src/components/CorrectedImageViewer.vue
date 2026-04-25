@@ -14,6 +14,7 @@ import type {
 import { getDatumColor } from "@/lib/datums"
 import { useAppStore } from "@/stores/app"
 import { loadMeasurements, saveMeasurements } from "@/lib/measurement-cache"
+import { loadZoom, saveZoom } from "@/lib/zoom-cache"
 
 const props = defineProps<{
     imageUrl: string
@@ -124,9 +125,43 @@ function loadImg() {
         img.value = image
         imgLoaded.value = true
         fitToContainer()
+        // After auto-fit, prefer a previously-saved zoom/pan if the
+        // values still place the image inside the container — protects
+        // against stale cache entries (different image dims) that would
+        // otherwise leave the viewer staring at empty canvas.
+        const hash = store.fileHash
+        if (hash) {
+            const cached = loadZoom(hash)
+            if (cached && isZoomReasonable(cached)) {
+                viewScale.value = cached.viewScale
+                viewOffsetX.value = cached.viewOffsetX
+                viewOffsetY.value = cached.viewOffsetY
+            }
+        }
         redraw()
     }
     image.src = props.imageUrl
+}
+
+// A cached zoom/pan is "reasonable" if the image's bounding box still
+// intersects the canvas at all under that transform. Catches the
+// degenerate case where the cache outlived an image dimension change.
+function isZoomReasonable(z: {
+    viewScale: number
+    viewOffsetX: number
+    viewOffsetY: number
+}): boolean {
+    if (!Number.isFinite(z.viewScale) || z.viewScale <= 0) return false
+    if (!Number.isFinite(z.viewOffsetX) || !Number.isFinite(z.viewOffsetY))
+        return false
+    const c = containerRef.value
+    const i = img.value
+    if (!c || !i) return false
+    const left = z.viewOffsetX
+    const top = z.viewOffsetY
+    const right = left + i.naturalWidth * z.viewScale
+    const bottom = top + i.naturalHeight * z.viewScale
+    return right > 0 && bottom > 0 && left < c.clientWidth && top < c.clientHeight
 }
 
 function fitToContainer() {
@@ -2250,6 +2285,24 @@ watch(
     },
     { deep: true },
 )
+
+// Persist zoom/pan with a small debounce — wheel events fire rapidly and
+// resize bursts shouldn't each hit localStorage. The debounce is short
+// enough that a normal pan-and-pause finishes saving before navigation.
+let zoomSaveTimer: ReturnType<typeof setTimeout> | null = null
+watch([viewScale, viewOffsetX, viewOffsetY], () => {
+    if (!imgLoaded.value || !store.fileHash) return
+    if (zoomSaveTimer) clearTimeout(zoomSaveTimer)
+    const hash = store.fileHash
+    zoomSaveTimer = setTimeout(() => {
+        saveZoom(hash, {
+            viewScale: viewScale.value,
+            viewOffsetX: viewOffsetX.value,
+            viewOffsetY: viewOffsetY.value,
+        })
+        zoomSaveTimer = null
+    }, 250)
+})
 </script>
 
 <template>
