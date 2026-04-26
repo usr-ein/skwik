@@ -296,15 +296,24 @@ function onFileSelect(e: Event) {
                      primary drop target. Two-step confirm: first click
                      arms it; second click within
                      CLEAR_CONFIRM_TIMEOUT_MS commits. -->
+                <!-- Mobile: icon-only when idle, icon + "Sure?" while
+                     confirming so the destructive prompt is unmistakable.
+                     Desktop: full label always (the centered card title
+                     has room beside it). -->
                 <Button
                     v-if="cacheCount > 0"
                     variant="ghost"
                     size="sm"
-                    class="absolute right-2 top-2 h-7 gap-1.5 text-xs"
+                    class="absolute right-2 top-2 h-7 gap-1.5 px-2 text-xs"
                     :class="
                         confirmingClear
                             ? 'text-destructive hover:text-destructive'
                             : 'text-muted-foreground/60 hover:text-destructive'
+                    "
+                    :aria-label="
+                        confirmingClear
+                            ? 'Confirm clear cache'
+                            : `Clear cache (${String(cacheCount)})`
                     "
                     @click="handleClearCacheClick"
                 >
@@ -325,11 +334,16 @@ function onFileSelect(e: Event) {
                         />
                         <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
                     </svg>
-                    {{
-                        confirmingClear
-                            ? "Are you sure?"
-                            : `Clear cache (${String(cacheCount)})`
-                    }}
+                    <span
+                        v-if="confirmingClear"
+                        class="whitespace-nowrap"
+                    >
+                        <span class="hidden sm:inline">Are you sure?</span>
+                        <span class="sm:hidden">Sure?</span>
+                    </span>
+                    <span v-else class="hidden whitespace-nowrap sm:inline">
+                        Clear cache ({{ cacheCount }})
+                    </span>
                 </Button>
                 <CardHeader class="text-center">
                     <CardTitle class="text-lg">Load Source Image</CardTitle>

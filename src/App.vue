@@ -25,28 +25,45 @@ const store = useAppStore()
             >Fork me on Gitea</a
         >
 
+        <!-- Header lays out as a single h-14 row on desktop and stacks
+             into title-row + stepper-row on mobile so the title doesn't
+             collide with the stepper at narrow widths. The theme toggle
+             stays in the desktop header but moves into the footer on
+             mobile (see below). -->
         <header
             class="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60"
         >
-            <div
-                class="mx-auto grid h-14 max-w-7xl grid-cols-3 items-center px-4"
-            >
-                <div><!-- spacer for ribbon --></div>
-                <div class="flex items-center justify-center gap-2">
-                    <SkwikLogo :size="28" />
-                    <h1
-                        class="font-mono text-lg font-semibold tracking-tight"
-                    >
-                        Skwik
-                    </h1>
-                    <span
-                        class="hidden text-[10px] font-medium uppercase tracking-widest text-muted-foreground sm:inline"
-                        >Perspective Correction</span
-                    >
+            <div class="mx-auto max-w-7xl px-4">
+                <div
+                    class="flex items-center justify-between gap-3 py-2 sm:grid sm:h-14 sm:grid-cols-3 sm:py-0"
+                >
+                    <div class="hidden sm:block">
+                        <!-- spacer for the fork-me ribbon -->
+                    </div>
+                    <div class="flex items-center gap-2 sm:justify-center">
+                        <SkwikLogo :size="28" />
+                        <h1
+                            class="font-mono text-lg font-semibold tracking-tight"
+                        >
+                            Skwik
+                        </h1>
+                        <span
+                            class="text-[10px] font-medium uppercase tracking-widest text-muted-foreground"
+                            >Perspective Correction</span
+                        >
+                    </div>
+                    <div class="hidden items-center justify-end gap-4 sm:flex">
+                        <StepIndicator />
+                        <ThemeToggle />
+                    </div>
                 </div>
-                <div class="flex items-center justify-end gap-4">
+                <!-- Mobile-only stepper row. overflow-x-auto keeps the
+                     page width sane if the labels still don't fit on
+                     very narrow screens. -->
+                <div
+                    class="-mx-4 flex justify-center overflow-x-auto px-4 pb-2 sm:hidden"
+                >
                     <StepIndicator />
-                    <ThemeToggle />
                 </div>
             </div>
         </header>
@@ -62,17 +79,28 @@ const store = useAppStore()
             <MeasureViewer v-else-if="store.currentStep === 5" />
         </main>
 
+        <!-- Footer is fixed to the bottom. On mobile we tuck the theme
+             toggle into the right edge so it's reachable without
+             eating into the header chrome; the toggle is absolutely
+             positioned so it doesn't push the centered byline around. -->
         <footer
             class="fixed inset-x-0 bottom-0 z-40 border-t border-border/50 bg-background/95 py-3 text-center text-xs text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-background/60"
         >
-            Made by
-            <a
-                href="https://github.com/usr-ein"
-                target="_blank"
-                rel="noopener"
-                class="underline underline-offset-2 transition-colors hover:text-foreground"
-                >Samuel Prevost</a
+            <span>
+                Made by
+                <a
+                    href="https://github.com/usr-ein"
+                    target="_blank"
+                    rel="noopener"
+                    class="underline underline-offset-2 transition-colors hover:text-foreground"
+                    >Samuel Prevost</a
+                >
+            </span>
+            <div
+                class="absolute bottom-1/2 right-2 translate-y-1/2 sm:hidden"
             >
+                <ThemeToggle />
+            </div>
         </footer>
     </div>
 </template>

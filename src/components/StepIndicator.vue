@@ -29,10 +29,10 @@ function handleClick(num: AppStep) {
         <template v-for="(step, i) in steps" :key="step.num">
             <button
                 v-if="isReachable(step.num)"
-                class="inline-flex items-center rounded-md border border-border px-2 py-0.5 font-mono text-xs font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
+                class="inline-flex shrink-0 items-center rounded-md border border-border px-2 py-0.5 font-mono text-xs font-medium transition-colors hover:bg-accent hover:text-accent-foreground"
                 @click="handleClick(step.num)"
             >
-                {{ step.num }}.{{ step.label }}
+                {{ step.label }}
             </button>
             <Badge
                 v-else
@@ -41,13 +41,13 @@ function handleClick(num: AppStep) {
                         ? 'default'
                         : 'outline'
                 "
-                class="cursor-default select-none font-mono text-xs"
+                class="shrink-0 cursor-default select-none font-mono text-xs"
                 :class="{
                     'opacity-40':
                         step.num > store.maxStepReached,
                 }"
             >
-                {{ step.num }}.{{ step.label }}
+                {{ step.label }}
             </Badge>
             <span
                 v-if="i < steps.length - 1"
