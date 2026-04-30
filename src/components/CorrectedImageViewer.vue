@@ -992,16 +992,50 @@ function rectsOverlap(
 
 // Greedy collision avoidance: process labels top-to-bottom by anchor Y,
 // place each at its desired position, and if it overlaps any already-placed
-// label, push it down past the offender. Predictable, fast for typical
-// measurement counts, and keeps every label still horizontally aligned with
-// its anchor (we only shift in Y). Labels that move significantly get a
-// leader line back to their anchor in `drawLabelAt`.
+// label OR any handle dot, push it down past the offender. Predictable,
+// fast for typical measurement counts, and keeps every label still
+// horizontally aligned with its anchor (we only shift in Y). Labels that
+// move significantly get a leader line back to their anchor in
+// `drawLabelAt`.
 function resolveLabelPositions(
     ctx: CanvasRenderingContext2D,
     list: Measurement[],
     rt: RenderCtx,
 ): Map<string, LabelPos> {
-    const gap = 8 * rt.strokeMul
+    const labelGap = 8 * rt.strokeMul
+    const handleGap = 4 * rt.strokeMul
+    // Approximate outer reach of a primary handle (8 px disk + 2 px white
+    // ring). Used as the half-extent of a phantom rect labels must dodge.
+    const handleHalf = 10 * rt.strokeMul
+
+    // Phantom rects around every handle on every measurement, in canvas
+    // coords. Storing the original handle centre so we can skip the handle
+    // sitting on a label's own anchor (ellipse / circle / angle anchors
+    // sit on the primary handle disk; without this exception the resolver
+    // would push the label arbitrarily far from its own measurement).
+    interface HandleRect {
+        cx: number
+        cy: number
+        x: number
+        y: number
+        w: number
+        h: number
+    }
+    const handleRects: HandleRect[] = []
+    for (const m of list) {
+        for (const h of getHandlePositions(m)) {
+            const s = imgToCtx(h.pt, rt)
+            handleRects.push({
+                cx: s.x,
+                cy: s.y,
+                x: s.x - handleHalf,
+                y: s.y - handleHalf,
+                w: handleHalf * 2,
+                h: handleHalf * 2,
+            })
+        }
+    }
+
     const items = list.map((m) => {
         const anchor = imgToCtx(labelAnchor(m), rt)
         const rect = labelRect(ctx, m, rt)
@@ -1015,8 +1049,28 @@ function resolveLabelPositions(
         while (safety-- > 0) {
             let collided = false
             for (const p of placed) {
-                if (rectsOverlap(it.rect, p.rect, gap)) {
-                    const shift = p.rect.y + p.rect.h + gap - it.rect.y
+                if (rectsOverlap(it.rect, p.rect, labelGap)) {
+                    const shift = p.rect.y + p.rect.h + labelGap - it.rect.y
+                    it.rect = {
+                        ...it.rect,
+                        y: it.rect.y + shift,
+                        textY: it.rect.textY + shift,
+                    }
+                    collided = true
+                    break
+                }
+            }
+            if (collided) continue
+            for (const hr of handleRects) {
+                // Skip the handle that sits on this label's own anchor —
+                // the per-type `offsetY` in `labelRect` already places the
+                // pill clear of it, and dodging it again would chase the
+                // label off-target.
+                const dx = hr.cx - it.anchor.x
+                const dy = hr.cy - it.anchor.y
+                if (dx * dx + dy * dy < 16) continue
+                if (rectsOverlap(it.rect, hr, handleGap)) {
+                    const shift = hr.y + hr.h + handleGap - it.rect.y
                     it.rect = {
                         ...it.rect,
                         y: it.rect.y + shift,
