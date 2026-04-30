@@ -118,7 +118,45 @@ export interface DeskewResult {
     diagnostics: DeskewDiagnostics
 }
 
-export type AppStep = 1 | 2 | 3 | 4 | 5
+export type AppStep = 1 | 2 | 3 | 4 | 5 | 6
+
+/** Crop rectangle stored as fractions (0..1) of the rotated deskewed
+ *  image. Persisting fractions (rather than absolute pixels) means the
+ *  same crop survives a re-deskew at a different output px/mm. */
+export interface CropRectFractions {
+    left: number
+    top: number
+    right: number
+    bottom: number
+}
+
+/** Per-hash post-deskew transform: rotate around the deskewed image's
+ *  centre by `rotationDeg`, then crop the bounding box defined by
+ *  fractional `crop` values of the rotated image. Default is identity:
+ *  rotation 0, crop covering the full image. */
+export interface CropRotateState {
+    rotationDeg: number
+    crop: CropRectFractions
+}
+
+export const IDENTITY_CROP_ROTATE: CropRotateState = {
+    rotationDeg: 0,
+    crop: { left: 0, top: 0, right: 1, bottom: 1 },
+}
+
+/** Pre-transform consumed by `CorrectedImageViewer`: maps measurement
+ *  points from the original deskewed-image space onto the bitmap that
+ *  is actually painted (which may be a rotated + cropped derivative).
+ *  See `CorrectedImageViewer.vue` for the formula. */
+export interface ImagePreTransform {
+    rotationDeg: number
+    srcW: number
+    srcH: number
+    rotW: number
+    rotH: number
+    cropX: number
+    cropY: number
+}
 
 /** Pixels per mm in the output image. Default 10 (= 100 px/cm). */
 export const DEFAULT_SCALE_PX_PER_MM = 10

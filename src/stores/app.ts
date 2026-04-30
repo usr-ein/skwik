@@ -1,7 +1,14 @@
 import { defineStore } from "pinia"
 import { ref, computed } from "vue"
-import type { AppStep, Datum, DeskewResult, ExifData, Point } from "@/types"
-import { DEFAULT_SCALE_PX_PER_MM } from "@/types"
+import type {
+    AppStep,
+    CropRotateState,
+    Datum,
+    DeskewResult,
+    ExifData,
+    Point,
+} from "@/types"
+import { DEFAULT_SCALE_PX_PER_MM, IDENTITY_CROP_ROTATE } from "@/types"
 import { loadSettings } from "@/lib/settings-cache"
 import { fitEllipse } from "@/lib/ellipse-fit"
 
@@ -27,6 +34,10 @@ export const useAppStore = defineStore("app", () => {
      *  produces a new result; consumers compare against the live
      *  `scalePxPerMm` to detect when measurements need to be rescaled. */
     const lastDeskewScale = ref<number | null>(null)
+    /** Rotation (deg) + fractional crop applied on top of the deskew
+     *  result. Identity = no rotation, full image. Persisted per-hash via
+     *  `src/lib/crop-cache.ts` so it survives reloads and re-deskews. */
+    const cropRotate = ref<CropRotateState>({ ...IDENTITY_CROP_ROTATE })
 
     const canProceedToStep2 = computed(() => loadedImage.value !== null)
     const canProceedToStep3 = computed(() => canProceedToStep2.value)
@@ -48,6 +59,7 @@ export const useAppStore = defineStore("app", () => {
     const canProceedToStep5 = computed(
         () => canProceedToStep4.value && deskewResult.value !== null,
     )
+    const canProceedToStep6 = computed(() => canProceedToStep5.value)
 
     function setImage(file: File, image: HTMLImageElement) {
         originalFile.value = file
@@ -178,6 +190,14 @@ export const useAppStore = defineStore("app", () => {
         fileHash.value = hash
     }
 
+    function setCropRotate(state: CropRotateState) {
+        cropRotate.value = state
+    }
+
+    function resetCropRotate() {
+        cropRotate.value = { ...IDENTITY_CROP_ROTATE }
+    }
+
     function reset() {
         currentStep.value = 1
         maxStepReached.value = 1
@@ -193,6 +213,7 @@ export const useAppStore = defineStore("app", () => {
         fileHash.value = null
         cacheRestoreMessage.value = ""
         lastDeskewScale.value = null
+        cropRotate.value = { ...IDENTITY_CROP_ROTATE }
     }
 
     return {
@@ -214,6 +235,10 @@ export const useAppStore = defineStore("app", () => {
         canProceedToStep3,
         canProceedToStep4,
         canProceedToStep5,
+        canProceedToStep6,
+        cropRotate,
+        setCropRotate,
+        resetCropRotate,
         setImage,
         setExif,
         goToStep,

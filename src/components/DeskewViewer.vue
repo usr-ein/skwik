@@ -301,7 +301,7 @@ async function runDeskew() {
                 <Button
                     :disabled="!store.canProceedToStep5"
                     @click="store.goToStep(5)"
-                    >Next: Measure</Button
+                    >Next: Crop</Button
                 >
             </div>
         </div>
@@ -738,8 +738,8 @@ async function runDeskew() {
                         >Deskewed Preview</CardTitle
                     >
                     <CardDescription>
-                        Continue to <strong>Measure</strong> to add
-                        annotations and download.
+                        Continue to <strong>Crop</strong> to rotate and
+                        crop the result before measuring.
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -757,7 +757,7 @@ async function runDeskew() {
 
             <div class="flex justify-center pb-8">
                 <Button size="lg" @click="store.goToStep(5)">
-                    Continue to Measure
+                    Continue to Crop
                     <svg
                         xmlns="http://www.w3.org/2000/svg"
                         width="18"

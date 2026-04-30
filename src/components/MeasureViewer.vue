@@ -15,6 +15,7 @@ import {
     CardTitle,
 } from "@/components/ui/card"
 import CorrectedImageViewer from "@/components/CorrectedImageViewer.vue"
+import type { ImagePreTransform } from "@/types"
 // `defineExpose` in CorrectedImageViewer makes these methods available on
 // the template ref, but Vue's ComponentPublicInstance type doesn't surface
 // them automatically — we type the ref explicitly so the call is checked.
@@ -25,12 +26,143 @@ type CorrectedImageViewerRef = InstanceType<typeof CorrectedImageViewer> & {
     }) => Promise<Blob>
 }
 import { loadSettings, saveSettings } from "@/lib/settings-cache"
+import {
+    rotatedBboxSize,
+    cropPixels,
+    renderRotatedCropped,
+} from "@/lib/crop-transform"
+import { patchUpload } from "@/lib/upload-cache"
 
 const store = useAppStore()
 const resultUrl = ref<string | null>(null)
+const imageTransform = ref<ImagePreTransform | null>(null)
 const viewerRef = ref<CorrectedImageViewerRef | null>(null)
 const error = ref("")
 const includeScaleBar = ref(false)
+
+// Debounce timer for the recent-uploads thumbnail. Measurement
+// dragging fires the watcher dozens of times a second; we only want
+// one regen per ~500 ms idle period.
+let previewTimer: ReturnType<typeof setTimeout> | null = null
+const PREVIEW_DEBOUNCE_MS = 500
+const PREVIEW_MAX_WIDTH = 400
+
+function downscaleToPreview(srcBlob: Blob): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(srcBlob)
+        const el = new Image()
+        el.onload = () => {
+            try {
+                const w = el.naturalWidth
+                const h = el.naturalHeight
+                if (w <= 0 || h <= 0) {
+                    reject(new Error("Empty preview source"))
+                    return
+                }
+                const ratio = Math.min(1, PREVIEW_MAX_WIDTH / w)
+                const tw = Math.max(1, Math.round(w * ratio))
+                const th = Math.max(1, Math.round(h * ratio))
+                const c = document.createElement("canvas")
+                c.width = tw
+                c.height = th
+                const ctx = c.getContext("2d")
+                if (!ctx) {
+                    reject(new Error("No 2D context"))
+                    return
+                }
+                ctx.drawImage(el, 0, 0, tw, th)
+                c.toBlob((b) => {
+                    if (b) resolve(b)
+                    else reject(new Error("preview toBlob failed"))
+                }, "image/png")
+            } finally {
+                URL.revokeObjectURL(url)
+            }
+        }
+        el.onerror = () => {
+            URL.revokeObjectURL(url)
+            reject(new Error("preview load failed"))
+        }
+        el.src = url
+    })
+}
+
+async function regeneratePreview() {
+    const viewer = viewerRef.value
+    const hash = store.fileHash
+    if (!viewer || !hash) return
+    try {
+        const annotated = await viewer.exportWithMeasurements({
+            scope: "full",
+            includeScaleBar: false,
+        })
+        const preview = await downscaleToPreview(annotated)
+        await patchUpload(hash, { previewBlob: preview })
+    } catch {
+        // Preview is a nice-to-have — never block the user on a failure.
+    }
+}
+
+function schedulePreview() {
+    if (previewTimer) clearTimeout(previewTimer)
+    previewTimer = setTimeout(() => {
+        previewTimer = null
+        void regeneratePreview()
+    }, PREVIEW_DEBOUNCE_MS)
+}
+
+// Render the rotation + crop applied to the deskew result and surface
+// it as an object URL + transform for CorrectedImageViewer. We keep
+// the stored measurements in pre-rotate, pre-crop deskewed-image
+// space, and pass a pre-transform so the viewer can draw them on the
+// cropped bitmap correctly. Recomputed on entry to Measure.
+async function buildTransformedSource() {
+    const result = store.deskewResult
+    if (!result) return
+    const url = URL.createObjectURL(result.correctedImageBlob)
+    try {
+        const image = await new Promise<HTMLImageElement>(
+            (resolve, reject) => {
+                const el = new Image()
+                el.onload = () => {
+                    resolve(el)
+                }
+                el.onerror = () => {
+                    reject(new Error("Failed to load deskewed image"))
+                }
+                el.src = url
+            },
+        )
+        const state = store.cropRotate
+        const rot = rotatedBboxSize(
+            image.naturalWidth,
+            image.naturalHeight,
+            state.rotationDeg,
+        )
+        const px = cropPixels(state, rot)
+        const out = renderRotatedCropped(image, state)
+        const blob = await new Promise<Blob>((resolve, reject) => {
+            out.toBlob((b) => {
+                if (b) resolve(b)
+                else reject(new Error("Crop render failed"))
+            }, "image/png")
+        })
+        if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
+        resultUrl.value = URL.createObjectURL(blob)
+        imageTransform.value = {
+            rotationDeg: state.rotationDeg,
+            srcW: image.naturalWidth,
+            srcH: image.naturalHeight,
+            rotW: rot.rotW,
+            rotH: rot.rotH,
+            cropX: px.cropX,
+            cropY: px.cropY,
+        }
+        schedulePreview()
+    } finally {
+        URL.revokeObjectURL(url)
+    }
+}
 
 onMounted(() => {
     const cached = loadSettings()
@@ -39,9 +171,7 @@ onMounted(() => {
     }
 
     if (store.deskewResult) {
-        resultUrl.value = URL.createObjectURL(
-            store.deskewResult.correctedImageBlob,
-        )
+        void buildTransformedSource()
     } else {
         // No result yet — bounce back to Deskew. Should never happen via
         // normal navigation since the Next button is gated, but if a user
@@ -53,6 +183,10 @@ onMounted(() => {
 
 onUnmounted(() => {
     if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
+    if (previewTimer) {
+        clearTimeout(previewTimer)
+        previewTimer = null
+    }
 })
 
 watch(includeScaleBar, () => {
@@ -138,14 +272,16 @@ function addScaleBar(image: HTMLImageElement): Promise<Blob> {
 }
 
 async function download() {
-    if (!store.deskewResult) return
+    if (!store.deskewResult || !resultUrl.value) return
 
-    let blob: Blob = store.deskewResult.correctedImageBlob
+    // Download the post-crop, post-rotation bitmap so the file matches
+    // what the user has been looking at in the Measure step. When the
+    // user kept the defaults (no rotation, full-image crop) this is
+    // bit-identical to the original deskew blob (modulo PNG re-encode).
+    let blob: Blob = await fetch(resultUrl.value).then((r) => r.blob())
 
     if (includeScaleBar.value) {
-        const imgUrl = URL.createObjectURL(
-            store.deskewResult.correctedImageBlob,
-        )
+        const imgUrl = URL.createObjectURL(blob)
         try {
             const image = await new Promise<HTMLImageElement>(
                 (resolve, reject) => {
@@ -227,9 +363,9 @@ async function downloadMeasured(scope: "full" | "view") {
                 variant="ghost"
                 size="icon"
                 class="shrink-0"
-                aria-label="Back to Deskew"
-                title="Back to Deskew"
-                @click="store.goToStep(4)"
+                aria-label="Back to Crop"
+                title="Back to Crop"
+                @click="store.goToStep(5)"
             >
                 <svg
                     xmlns="http://www.w3.org/2000/svg"
@@ -395,6 +531,8 @@ async function downloadMeasured(scope: "full" | "view") {
                     ref="viewerRef"
                     :image-url="resultUrl"
                     :scale-px-per-mm="store.scalePxPerMm"
+                    :image-transform="imageTransform ?? undefined"
+                    @measurements-changed="schedulePreview"
                 />
             </CardContent>
         </Card>

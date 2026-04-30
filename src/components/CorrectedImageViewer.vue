@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue"
 import { useMediaQuery } from "@vueuse/core"
 import { nanoid } from "nanoid"
-import type { Point } from "@/types"
+import type { ImagePreTransform, Point } from "@/types"
 import type {
     LineMeasurement,
     RectMeasurement,
@@ -16,9 +16,37 @@ import { useAppStore } from "@/stores/app"
 import { loadMeasurements, saveMeasurements } from "@/lib/measurement-cache"
 import { loadZoom, saveZoom } from "@/lib/zoom-cache"
 
+// `imageTransform` is an optional pre-transform from
+// "deskewed-image space" (the original untransformed measurement
+// coordinate frame) to the bitmap space of the image actually shown
+// by `imageUrl`. Used by the Crop & Rotate step so measurements stay
+// anchored to the deskewed image while the user views a rotated +
+// cropped sub-bitmap. The mapping is:
+//
+//   measurement_pt → rotate around (srcW/2, srcH/2) by rotationDeg
+//                  → translate by (rotW/2, rotH/2)
+//                  → subtract (cropX, cropY) → bitmap_pt
+//
+// When omitted (or set to identity values), behaviour is unchanged.
+//
+// The viewer does NOT rewrite stored measurement coordinates when the
+// transform changes; it only adjusts the draw-time projection. This is
+// option (b) from the task brief and means changing the crop/rotation
+// never invalidates persisted measurements.
 const props = defineProps<{
     imageUrl: string
     scalePxPerMm: number
+    /** Optional pre-transform; identity when not supplied. */
+    imageTransform?: ImagePreTransform
+}>()
+
+// Emit when the measurement set changes (add / mutate / delete) so the
+// parent can refresh the recent-uploads gallery thumbnail. Fired
+// debounced (via the same `measurements` deep watcher that persists to
+// localStorage) so high-frequency interactions like dragging an
+// endpoint don't thrash the encoder.
+const emit = defineEmits<{
+    (event: "measurements-changed"): void
 }>()
 
 const isMobile = useMediaQuery("(max-width: 767px)")
@@ -356,25 +384,68 @@ function makeLiveCtx(): RenderCtx {
     }
 }
 
-function imgToCtx(pt: Point, t: RenderCtx): Point {
+// Project a measurement point from deskewed-image space into the
+// shown bitmap's coordinate frame. When no `imageTransform` is set we
+// short-circuit to the identity for a tiny perf win and to keep the
+// behaviour pixel-identical for the legacy non-cropped path.
+function imgPreTransform(pt: Point): Point {
+    const tr = props.imageTransform
+    if (!tr) return pt
+    const r = (tr.rotationDeg * Math.PI) / 180
+    const cx = tr.srcW / 2
+    const cy = tr.srcH / 2
+    const dx = pt.x - cx
+    const dy = pt.y - cy
+    const cos = Math.cos(r)
+    const sin = Math.sin(r)
+    const rx = dx * cos - dy * sin + tr.rotW / 2
+    const ry = dx * sin + dy * cos + tr.rotH / 2
+    return { x: rx - tr.cropX, y: ry - tr.cropY }
+}
+
+// Inverse of `imgPreTransform`: bitmap-space → deskewed-image space.
+// Used by `screenToImg` so pointer-driven placements / drags stay in
+// the canonical measurement coordinate frame.
+function imgPreTransformInverse(pt: Point): Point {
+    const tr = props.imageTransform
+    if (!tr) return pt
+    const r = (tr.rotationDeg * Math.PI) / 180
+    const cx = tr.srcW / 2
+    const cy = tr.srcH / 2
+    const rx = pt.x + tr.cropX
+    const ry = pt.y + tr.cropY
+    const dx = rx - tr.rotW / 2
+    const dy = ry - tr.rotH / 2
+    const cos = Math.cos(r)
+    const sin = Math.sin(r)
     return {
-        x: pt.x * t.scale + t.offsetX,
-        y: pt.y * t.scale + t.offsetY,
+        x: dx * cos + dy * sin + cx,
+        y: -dx * sin + dy * cos + cy,
+    }
+}
+
+function imgToCtx(pt: Point, t: RenderCtx): Point {
+    const b = imgPreTransform(pt)
+    return {
+        x: b.x * t.scale + t.offsetX,
+        y: b.y * t.scale + t.offsetY,
     }
 }
 
 function imgToScreen(pt: Point): Point {
+    const b = imgPreTransform(pt)
     return {
-        x: pt.x * viewScale.value + viewOffsetX.value,
-        y: pt.y * viewScale.value + viewOffsetY.value,
+        x: b.x * viewScale.value + viewOffsetX.value,
+        y: b.y * viewScale.value + viewOffsetY.value,
     }
 }
 
 function screenToImg(sx: number, sy: number): Point {
-    return {
+    const b: Point = {
         x: (sx - viewOffsetX.value) / viewScale.value,
         y: (sy - viewOffsetY.value) / viewScale.value,
     }
+    return imgPreTransformInverse(b)
 }
 
 // If `snapToAngle` is on, rotate `to` around `from` to the nearest 45°
@@ -2324,6 +2395,7 @@ watch(
         if (store.fileHash) {
             saveMeasurements(store.fileHash, next)
         }
+        emit("measurements-changed")
     },
     { deep: true },
 )

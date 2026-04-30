@@ -5,6 +5,7 @@ import ImageUpload from "@/components/ImageUpload.vue"
 import ExifViewer from "@/components/ExifViewer.vue"
 import DatumEditor from "@/components/DatumEditor.vue"
 import DeskewViewer from "@/components/DeskewViewer.vue"
+import CropViewer from "@/components/CropViewer.vue"
 import MeasureViewer from "@/components/MeasureViewer.vue"
 import ThemeToggle from "@/components/ThemeToggle.vue"
 import SkwikLogo from "@/components/SkwikLogo.vue"
@@ -76,7 +77,8 @@ const store = useAppStore()
             <ExifViewer v-else-if="store.currentStep === 2" />
             <DatumEditor v-else-if="store.currentStep === 3" />
             <DeskewViewer v-else-if="store.currentStep === 4" />
-            <MeasureViewer v-else-if="store.currentStep === 5" />
+            <CropViewer v-else-if="store.currentStep === 5" />
+            <MeasureViewer v-else-if="store.currentStep === 6" />
         </main>
 
         <!-- Footer is fixed to the bottom. On mobile we tuck the theme
