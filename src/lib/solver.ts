@@ -265,23 +265,28 @@ type Primary =
     | { kind: "line"; datum: LineDatum }
     | { kind: "ellipse"; datum: EllipseDatum }
 
+function flaggedPrimary(d: Datum): Primary | null {
+    if (d.type === "rectangle" && d.isAxisReference) return { kind: "rect", datum: d }
+    if (d.type === "line" && d.axisRole) return { kind: "line", datum: d }
+    if (d.type === "ellipse" && d.isPrimary) return { kind: "ellipse", datum: d }
+    return null
+}
+
 function pickPrimary(datums: Datum[]): Primary {
     if (datums.length === 0) throw new Error("No datums provided.")
 
-    // User-flagged primary wins regardless of type priority. Rect's
-    // `isAxisReference` and line's `axisRole` carry axis semantics on top
-    // of "primary"; ellipse's `isPrimary` is a pure primary flag (ellipses
-    // don't define axis directions on their own).
+    // User-flagged primary wins regardless of type. The store
+    // (`setAxisRole`) enforces mutual exclusion across the three flag
+    // kinds — `RectDatum.isAxisReference`, `LineDatum.axisRole`, and
+    // `EllipseDatum.isPrimary` — so at most one datum is flagged at any
+    // time. Within a single datum only one of those fields can be set
+    // (discriminated union), so the check order inside `flaggedPrimary`
+    // is moot. If a future caller bypasses `setAxisRole` and creates
+    // multiple flagged datums, the first one in array order wins —
+    // deterministic but not semantic.
     for (const d of datums) {
-        if (d.type === "rectangle" && d.isAxisReference) {
-            return { kind: "rect", datum: d }
-        }
-        if (d.type === "line" && d.axisRole) {
-            return { kind: "line", datum: d }
-        }
-        if (d.type === "ellipse" && d.isPrimary) {
-            return { kind: "ellipse", datum: d }
-        }
+        const flagged = flaggedPrimary(d)
+        if (flagged) return flagged
     }
 
     const typeRank = (d: Datum): number =>

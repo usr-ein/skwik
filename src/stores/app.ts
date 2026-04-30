@@ -113,16 +113,23 @@ export const useAppStore = defineStore("app", () => {
         id: string,
         role: "rect" | "x" | "y" | "ellipse" | null,
     ) {
-        // Clear any existing flag on other datums.
-        for (let i = 0; i < datums.value.length; i++) {
-            const d = datums.value[i]
-            if (!d || d.id === id) continue
-            if (d.type === "rectangle" && d.isAxisReference) {
-                datums.value[i] = { ...d, isAxisReference: false }
-            } else if (d.type === "line" && d.axisRole) {
-                datums.value[i] = { ...d, axisRole: null }
-            } else if (d.type === "ellipse" && d.isPrimary) {
-                datums.value[i] = { ...d, isPrimary: false }
+        // Only clear *other* datums' flags when actually assigning a new
+        // primary. A pure clear (`role === null`) must be a no-op against
+        // the rest of the set, otherwise clicking "None" on an unflagged
+        // line would silently strip the primary off whatever rect/ellipse
+        // legitimately holds it. The docstring guarantees "no-op if it
+        // wasn't set" for the target too — see the null branch below.
+        if (role !== null) {
+            for (let i = 0; i < datums.value.length; i++) {
+                const d = datums.value[i]
+                if (!d || d.id === id) continue
+                if (d.type === "rectangle" && d.isAxisReference) {
+                    datums.value[i] = { ...d, isAxisReference: false }
+                } else if (d.type === "line" && d.axisRole) {
+                    datums.value[i] = { ...d, axisRole: null }
+                } else if (d.type === "ellipse" && d.isPrimary) {
+                    datums.value[i] = { ...d, isPrimary: false }
+                }
             }
         }
         const idx = datums.value.findIndex((d) => d.id === id)
@@ -134,7 +141,7 @@ export const useAppStore = defineStore("app", () => {
                 datums.value[idx] = { ...target, isAxisReference: false }
             } else if (target.type === "line") {
                 datums.value[idx] = { ...target, axisRole: null }
-            } else {
+            } else if (target.type === "ellipse") {
                 datums.value[idx] = { ...target, isPrimary: false }
             }
             return
