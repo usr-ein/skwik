@@ -103,14 +103,15 @@ export const useAppStore = defineStore("app", () => {
         }
     }
 
-    /** Set (or clear) the world-axis role on a datum, enforcing that at
+    /** Set (or clear) the gauge-primary role on a datum, enforcing that at
      *  most one datum holds the role at a time.
-     *  `role`: "rect"  → rectangle.isAxisReference = true
-     *          "x"/"y" → line.axisRole = "x"|"y"
-     *          null    → clear the role on `id` (no-op if it wasn't set). */
+     *  `role`: "rect"    → rectangle.isAxisReference = true
+     *          "x"/"y"   → line.axisRole = "x"|"y"
+     *          "ellipse" → ellipse.isPrimary = true
+     *          null      → clear the role on `id` (no-op if it wasn't set). */
     function setAxisRole(
         id: string,
-        role: "rect" | "x" | "y" | null,
+        role: "rect" | "x" | "y" | "ellipse" | null,
     ) {
         // Clear any existing flag on other datums.
         for (let i = 0; i < datums.value.length; i++) {
@@ -120,6 +121,8 @@ export const useAppStore = defineStore("app", () => {
                 datums.value[i] = { ...d, isAxisReference: false }
             } else if (d.type === "line" && d.axisRole) {
                 datums.value[i] = { ...d, axisRole: null }
+            } else if (d.type === "ellipse" && d.isPrimary) {
+                datums.value[i] = { ...d, isPrimary: false }
             }
         }
         const idx = datums.value.findIndex((d) => d.id === id)
@@ -131,6 +134,8 @@ export const useAppStore = defineStore("app", () => {
                 datums.value[idx] = { ...target, isAxisReference: false }
             } else if (target.type === "line") {
                 datums.value[idx] = { ...target, axisRole: null }
+            } else {
+                datums.value[idx] = { ...target, isPrimary: false }
             }
             return
         }
@@ -138,6 +143,8 @@ export const useAppStore = defineStore("app", () => {
             datums.value[idx] = { ...target, isAxisReference: true }
         } else if ((role === "x" || role === "y") && target.type === "line") {
             datums.value[idx] = { ...target, axisRole: role }
+        } else if (role === "ellipse" && target.type === "ellipse") {
+            datums.value[idx] = { ...target, isPrimary: true }
         }
     }
 

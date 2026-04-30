@@ -268,13 +268,19 @@ type Primary =
 function pickPrimary(datums: Datum[]): Primary {
     if (datums.length === 0) throw new Error("No datums provided.")
 
-    // User-flagged world-axis reference wins regardless of type priority.
+    // User-flagged primary wins regardless of type priority. Rect's
+    // `isAxisReference` and line's `axisRole` carry axis semantics on top
+    // of "primary"; ellipse's `isPrimary` is a pure primary flag (ellipses
+    // don't define axis directions on their own).
     for (const d of datums) {
         if (d.type === "rectangle" && d.isAxisReference) {
             return { kind: "rect", datum: d }
         }
         if (d.type === "line" && d.axisRole) {
             return { kind: "line", datum: d }
+        }
+        if (d.type === "ellipse" && d.isPrimary) {
+            return { kind: "ellipse", datum: d }
         }
     }
 

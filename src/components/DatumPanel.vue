@@ -96,6 +96,7 @@ function axisBadge(datum: Datum): string | null {
     if (datum.type === "rectangle" && datum.isAxisReference) return "axis"
     if (datum.type === "line" && datum.axisRole === "x") return "+x"
     if (datum.type === "line" && datum.axisRole === "y") return "+y"
+    if (datum.type === "ellipse" && datum.isPrimary) return "primary"
     return null
 }
 </script>
@@ -406,6 +407,35 @@ function axisBadge(datum: Datum): string | null {
                                 {{ opt.label }}
                             </button>
                         </div>
+                    </div>
+                    <div
+                        v-else-if="datum.type === 'ellipse'"
+                        class="flex items-center justify-between"
+                    >
+                        <Label class="text-xs">Primary reference</Label>
+                        <label
+                            class="flex cursor-pointer items-center gap-1.5"
+                            @click.stop
+                        >
+                            <input
+                                type="checkbox"
+                                class="accent-primary"
+                                :checked="datum.isPrimary ?? false"
+                                @change="
+                                    (e) =>
+                                        store.setAxisRole(
+                                            datum.id,
+                                            (e.target as HTMLInputElement)
+                                                .checked
+                                                ? 'ellipse'
+                                                : null,
+                                        )
+                                "
+                            />
+                            <span class="text-xs text-muted-foreground"
+                                >Use</span
+                            >
+                        </label>
                     </div>
 
                     <!-- Confidence -->

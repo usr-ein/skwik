@@ -49,6 +49,10 @@ export interface EllipseDatum {
     diameterMm: number
     confidence: 1 | 2 | 3 | 4 | 5
     label: string
+    /** When true, this ellipse is the gauge primary — overrides the
+     *  type-rank auto-pick. Mutually exclusive with `RectDatum.isAxisReference`
+     *  and `LineDatum.axisRole`; setting any of those clears the others. */
+    isPrimary?: boolean
 }
 
 export type Datum = RectDatum | LineDatum | EllipseDatum
