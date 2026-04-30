@@ -15,45 +15,45 @@ const store = useAppStore()
 
 <template>
     <div class="min-h-screen bg-background text-foreground">
-        <!-- Header lays out as a single h-14 row on desktop and stacks
-             into title-row + stepper-row on mobile so the title doesn't
-             collide with the stepper at narrow widths. The theme toggle
-             stays in the desktop header but moves into the footer on
-             mobile (see below). -->
+        <!-- Header layout:
+             - >= lg: single h-14 row, logo flush left, stepper + theme
+               toggle on the right.
+             - < lg: stack into a logo row and a stepper row below it,
+               theme toggle aligned with the logo on the right. The
+               stepper row gets `overflow-x-auto` so the labels don't
+               break the page width on narrow tablets/phones. -->
         <header
             class="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60"
         >
             <div class="mx-auto max-w-7xl px-4">
                 <div
-                    class="flex items-center justify-between gap-3 py-2 sm:grid sm:h-14 sm:grid-cols-3 sm:py-0"
+                    class="flex flex-col gap-2 py-2 lg:h-14 lg:flex-row lg:items-center lg:justify-between lg:py-0"
                 >
-                    <div class="hidden sm:block">
-                        <!-- left-column spacer for the 3-col grid -->
+                    <div class="flex items-center justify-between gap-2">
+                        <div class="flex items-center gap-2">
+                            <SkwikLogo :size="28" />
+                            <h1
+                                class="font-mono text-lg font-semibold tracking-tight"
+                            >
+                                Skwik
+                            </h1>
+                            <span
+                                class="text-[10px] font-medium uppercase tracking-widest text-muted-foreground"
+                                >Perspective Correction</span
+                            >
+                        </div>
+                        <div class="lg:hidden">
+                            <ThemeToggle />
+                        </div>
                     </div>
-                    <div class="flex items-center gap-2 sm:justify-center">
-                        <SkwikLogo :size="28" />
-                        <h1
-                            class="font-mono text-lg font-semibold tracking-tight"
-                        >
-                            Skwik
-                        </h1>
-                        <span
-                            class="text-[10px] font-medium uppercase tracking-widest text-muted-foreground"
-                            >Perspective Correction</span
-                        >
-                    </div>
-                    <div class="hidden items-center justify-end gap-4 sm:flex">
+                    <div
+                        class="-mx-4 flex justify-center overflow-x-auto px-4 lg:mx-0 lg:items-center lg:justify-end lg:gap-4 lg:overflow-visible lg:px-0"
+                    >
                         <StepIndicator />
-                        <ThemeToggle />
+                        <div class="hidden lg:block">
+                            <ThemeToggle />
+                        </div>
                     </div>
-                </div>
-                <!-- Mobile-only stepper row. overflow-x-auto keeps the
-                     page width sane if the labels still don't fit on
-                     very narrow screens. -->
-                <div
-                    class="-mx-4 flex justify-center overflow-x-auto px-4 pb-2 sm:hidden"
-                >
-                    <StepIndicator />
                 </div>
             </div>
         </header>
@@ -70,10 +70,9 @@ const store = useAppStore()
             <MeasureViewer v-else-if="store.currentStep === 6" />
         </main>
 
-        <!-- Footer is fixed to the bottom. On mobile we tuck the theme
-             toggle into the right edge so it's reachable without
-             eating into the header chrome; the toggle is absolutely
-             positioned so it doesn't push the centered byline around. -->
+        <!-- Footer is fixed to the bottom and only carries the byline +
+             GitHub link. The theme toggle now lives in the header at
+             every breakpoint. -->
         <footer
             class="fixed inset-x-0 bottom-0 z-40 border-t border-border/50 bg-background/95 py-3 text-center text-xs text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-background/60"
         >
@@ -113,11 +112,6 @@ const store = useAppStore()
                     Fork me on GitHub
                 </a>
             </span>
-            <div
-                class="absolute bottom-1/2 right-2 translate-y-1/2 sm:hidden"
-            >
-                <ThemeToggle />
-            </div>
         </footer>
     </div>
 </template>
