@@ -51,6 +51,13 @@ const gridSpacingMm = ref(10)
 // the nearest 45° (0/45/90/135…) relative to the fixed endpoint or angle
 // vertex. Length is preserved; only direction is constrained.
 const snapToAngle = ref(false)
+// Full-screen mode: render the viewer as a fixed-position overlay covering
+// the viewport. The ResizeObserver picks up the new container size and
+// re-fits the image; nothing else needs to change.
+const isFullscreen = ref(false)
+function toggleFullscreen() {
+    isFullscreen.value = !isFullscreen.value
+}
 
 // Measurement types live in `@/types/measurements` so the cache module and
 // other consumers can share them. Geometry is in image space so it stays
@@ -558,7 +565,16 @@ function labelRect(
     const h = 20 * rt.strokeMul
     const w = tw + pad * 2
     // Offset the label above the anchor so it doesn't sit on top of a handle.
-    const offsetY = (m.type === "angle" ? 22 : 14) * rt.strokeMul
+    // Anchor types whose anchor coincides with a handle disk need extra
+    // clearance so the label doesn't sit on top of the handle. Selected
+    // primary handles are 8 px radius + 2 px stroke, so we need at least
+    // h/2 + 10 + breathing-room. Line midpoint and rect centroid don't
+    // host a handle — they only need a small visual gap from the anchor.
+    const anchorOnHandle =
+        m.type === "ellipse" ||
+        m.type === "circle" ||
+        m.type === "angle"
+    const offsetY = (anchorOnHandle ? 26 : 16) * rt.strokeMul
     const x = anchor.x - w / 2
     const y = anchor.y - h / 2 - offsetY
     return { x, y, w, h, textX: anchor.x, textY: anchor.y - offsetY, fontPx }
@@ -572,8 +588,14 @@ function drawMeasurement(
 ) {
     const baseColor = getDatumColor(m.colorIndex)
     const decorate = rt.drawSelectionDecorations
-    const strokeColor = decorate && isSelected ? "#ffffff" : baseColor
-    const lineAlpha = decorate ? (isSelected ? 1.0 : 0.8) : 1.0
+    // The selected shape always renders in its own colour rather than a
+    // white "highlight" stroke — the colour is what ties the geometry to
+    // its label pill, so swapping it out on selection actively hurts
+    // identification. We dim unselected shapes more aggressively (0.45 vs
+    // 0.8) and keep the thicker, solid stroke for the selected one so it
+    // still stands out without recolouring.
+    const strokeColor = baseColor
+    const lineAlpha = decorate ? (isSelected ? 1.0 : 0.45) : 1.0
     const lineWidth = (decorate && isSelected ? 3 : 2) * rt.strokeMul
 
     ctx.save()
@@ -893,7 +915,7 @@ function resolveLabelPositions(
     list: Measurement[],
     rt: RenderCtx,
 ): Map<string, LabelPos> {
-    const gap = 4 * rt.strokeMul
+    const gap = 8 * rt.strokeMul
     const items = list.map((m) => {
         const anchor = imgToCtx(labelAnchor(m), rt)
         const rect = labelRect(ctx, m, rt)
@@ -923,19 +945,36 @@ function resolveLabelPositions(
         placed.push(it)
     }
 
+    // Clamp every label to the destination canvas so exports never clip
+    // labels off the edge. Done after collision resolution as a separate
+    // pass — clamping can re-introduce overlaps, which we accept since
+    // staying inside the bitmap is more important than zero-overlap on
+    // crowded edges. The live overlay benefits too: labels near the
+    // viewport edge stay visible instead of running off the canvas.
+    const cw = ctx.canvas.width
+    const ch = ctx.canvas.height
     const out = new Map<string, LabelPos>()
     const shiftThreshold = 4 * rt.strokeMul
     for (const it of placed) {
+        let { x, y, w, h, textX, textY, fontPx } = it.rect
+        const dx =
+            x < 0 ? -x : x + w > cw ? cw - (x + w) : 0
+        const dy =
+            y < 0 ? -y : y + h > ch ? ch - (y + h) : 0
+        x += dx
+        y += dy
+        textX += dx
+        textY += dy
         out.set(it.id, {
-            x: it.rect.x,
-            y: it.rect.y,
-            w: it.rect.w,
-            h: it.rect.h,
-            textX: it.rect.textX,
-            textY: it.rect.textY,
-            fontPx: it.rect.fontPx,
+            x,
+            y,
+            w,
+            h,
+            textX,
+            textY,
+            fontPx,
             anchor: it.anchor,
-            shifted: Math.abs(it.rect.y - it.originalY) > shiftThreshold,
+            shifted: Math.abs(y - it.originalY) > shiftThreshold,
         })
     }
     return out
@@ -1708,21 +1747,20 @@ function pointerDown(
     const hit = hitTest(cursor)
     if (hit) {
         const target = measurements.value.find((m) => m.id === hit.measurementId)
-        // Circles are exclusively manipulated via their two handles —
-        // center (which translates the whole circle while keeping its
-        // radius) and edge (resize). Body and label hits don't drag.
-        const isCircleBodyHit =
-            target?.type === "circle" && hit.kind !== "handle"
-        // When a placement tool is active and the hit is on a circle's
-        // body, fall through to placement entirely — don't select, don't
-        // suppress the click. This lets the user draw a new measurement
-        // on top of an existing circle. Handles still claim the press
-        // so the circle can be reshaped from within an active tool too.
-        if (isCircleBodyHit && activeTool.value !== "none") {
+        // Closed shapes (circle, rectangle) are only draggable from their
+        // handles — corner dots for rect, center / edge for circle. Body
+        // hits select but never start a drag, so big shapes don't drift
+        // when the user clicks inside them. When a placement tool is
+        // active, body hits fall through entirely so the user can draw a
+        // new measurement on top of an existing closed shape.
+        const isClosedBodyHit =
+            (target?.type === "circle" || target?.type === "rectangle") &&
+            hit.kind !== "handle"
+        if (isClosedBodyHit && activeTool.value !== "none") {
             return "placement"
         }
         selectedId.value = hit.measurementId
-        if (target && !isCircleBodyHit) {
+        if (target && !isClosedBodyHit) {
             const mode: DragMode = hit.kind === "handle" ? "handle" : "move"
             dragState = {
                 mode,
@@ -1978,6 +2016,10 @@ function onKeyDown(e: KeyboardEvent) {
         if (selectedId.value !== null) {
             selectedId.value = null
             drawOverlay()
+            return
+        }
+        if (isFullscreen.value) {
+            isFullscreen.value = false
         }
         return
     }
@@ -2306,7 +2348,16 @@ watch([viewScale, viewOffsetX, viewOffsetY], () => {
 </script>
 
 <template>
-    <div class="space-y-3">
+    <!-- In fullscreen mode the viewer becomes a fixed-position overlay that
+         covers the viewport. The ResizeObserver inside the canvas picks up
+         the new container size and re-fits automatically. Esc exits. -->
+    <div
+        :class="
+            isFullscreen
+                ? 'fixed inset-0 z-50 space-y-3 overflow-auto bg-background p-4'
+                : 'space-y-3'
+        "
+    >
         <!-- Toolbar -->
         <div class="flex flex-wrap items-center gap-2 text-sm">
             <div class="inline-flex rounded-md border border-border p-0.5">
@@ -2441,6 +2492,52 @@ watch([viewScale, viewOffsetX, viewOffsetY], () => {
                 @click="clearMeasurements"
             >
                 Clear all
+            </button>
+
+            <button
+                class="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+                :title="
+                    isFullscreen
+                        ? 'Exit fullscreen (Esc)'
+                        : 'Expand to fullscreen'
+                "
+                @click="toggleFullscreen"
+            >
+                <svg
+                    v-if="!isFullscreen"
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
+                    <path d="M3 9V3h6" />
+                    <path d="M21 9V3h-6" />
+                    <path d="M3 15v6h6" />
+                    <path d="M21 15v6h-6" />
+                </svg>
+                <svg
+                    v-else
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
+                    <path d="M9 3v6H3" />
+                    <path d="M15 3v6h6" />
+                    <path d="M9 21v-6H3" />
+                    <path d="M15 21v-6h6" />
+                </svg>
+                {{ isFullscreen ? "Exit" : "Fullscreen" }}
             </button>
 
             <div class="mx-1 h-4 w-px bg-border" />
