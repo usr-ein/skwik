@@ -15,7 +15,6 @@ import {
     CardTitle,
 } from "@/components/ui/card"
 import CorrectedImageViewer from "@/components/CorrectedImageViewer.vue"
-import type { ImagePreTransform } from "@/types"
 // `defineExpose` in CorrectedImageViewer makes these methods available on
 // the template ref, but Vue's ComponentPublicInstance type doesn't surface
 // them automatically — we type the ref explicitly so the call is checked.
@@ -26,16 +25,17 @@ type CorrectedImageViewerRef = InstanceType<typeof CorrectedImageViewer> & {
     }) => Promise<Blob>
 }
 import { loadSettings, saveSettings } from "@/lib/settings-cache"
-import {
-    rotatedBboxSize,
-    cropPixels,
-    renderRotatedCropped,
-} from "@/lib/crop-transform"
+import { renderRotatedCropped } from "@/lib/crop-render"
 import { patchUpload } from "@/lib/upload-cache"
 
 const store = useAppStore()
 const resultUrl = ref<string | null>(null)
-const imageTransform = ref<ImagePreTransform | null>(null)
+// Source dimensions of the deskewed bitmap (the input to rotate+crop).
+// Captured once when we render the cropped output and passed to
+// CorrectedImageViewer so it can derive the bitmap-space affine for
+// projecting measurement coords. Null until the deskew bitmap is
+// decoded for the first time.
+const srcDims = ref<{ w: number; h: number } | null>(null)
 const viewerRef = ref<CorrectedImageViewerRef | null>(null)
 const error = ref("")
 const includeScaleBar = ref(false)
@@ -133,14 +133,7 @@ async function buildTransformedSource() {
                 el.src = url
             },
         )
-        const state = store.cropRotate
-        const rot = rotatedBboxSize(
-            image.naturalWidth,
-            image.naturalHeight,
-            state.rotationDeg,
-        )
-        const px = cropPixels(state, rot)
-        const out = renderRotatedCropped(image, state)
+        const out = renderRotatedCropped(image, store.cropRotate)
         const blob = await new Promise<Blob>((resolve, reject) => {
             out.toBlob((b) => {
                 if (b) resolve(b)
@@ -149,15 +142,7 @@ async function buildTransformedSource() {
         })
         if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
         resultUrl.value = URL.createObjectURL(blob)
-        imageTransform.value = {
-            rotationDeg: state.rotationDeg,
-            srcW: image.naturalWidth,
-            srcH: image.naturalHeight,
-            rotW: rot.rotW,
-            rotH: rot.rotH,
-            cropX: px.cropX,
-            cropY: px.cropY,
-        }
+        srcDims.value = { w: image.naturalWidth, h: image.naturalHeight }
         schedulePreview()
     } finally {
         URL.revokeObjectURL(url)
@@ -531,7 +516,15 @@ async function downloadMeasured(scope: "full" | "view") {
                     ref="viewerRef"
                     :image-url="resultUrl"
                     :scale-px-per-mm="store.scalePxPerMm"
-                    :image-transform="imageTransform ?? undefined"
+                    :crop="
+                        srcDims
+                            ? {
+                                  state: store.cropRotate,
+                                  srcW: srcDims.w,
+                                  srcH: srcDims.h,
+                              }
+                            : undefined
+                    "
                     @measurements-changed="schedulePreview"
                 />
             </CardContent>

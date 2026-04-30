@@ -38,12 +38,30 @@ const imgUrl = ref<string | null>(null)
 // permanently blank canvas.
 const loadError = ref(false)
 
-// Rotation in degrees. Crop fractions of the rotated bbox.
-const rotationDeg = ref(0)
-const cropLeft = ref(0)
-const cropTop = ref(0)
-const cropRight = ref(1)
-const cropBottom = ref(1)
+// Single source of truth: `store.cropRotate`. Rotations and crop drags
+// update the store directly so the live state and the persisted state
+// can never drift mid-interaction. localStorage is only written on
+// explicit commit (drag end, rotation change, unmount) via
+// `flushToCache()` — that keeps the store hot without thrashing the
+// disk on every pointermove.
+const rotationDeg = computed(() => store.cropRotate.rotationDeg)
+const cropLeft = computed(() => store.cropRotate.crop.left)
+const cropTop = computed(() => store.cropRotate.crop.top)
+const cropRight = computed(() => store.cropRotate.crop.right)
+const cropBottom = computed(() => store.cropRotate.crop.bottom)
+
+function setRotationOnly(deg: number) {
+    store.setCropRotate({ ...store.cropRotate, rotationDeg: deg })
+}
+
+function setCropOnly(crop: {
+    left: number
+    top: number
+    right: number
+    bottom: number
+}) {
+    store.setCropRotate({ ...store.cropRotate, crop })
+}
 
 // Live-fit transform from rotated-bbox space → screen canvas pixels.
 // Recomputed on resize / rotation change so the user always sees the
@@ -60,19 +78,9 @@ const rotBbox = computed(() => {
     return rotatedBboxSize(i.naturalWidth, i.naturalHeight, rotationDeg.value)
 })
 
-function persist() {
+function flushToCache() {
     if (!store.fileHash) return
-    const state = {
-        rotationDeg: rotationDeg.value,
-        crop: {
-            left: cropLeft.value,
-            top: cropTop.value,
-            right: cropRight.value,
-            bottom: cropBottom.value,
-        },
-    }
-    store.setCropRotate(state)
-    saveCropRotate(store.fileHash, state)
+    saveCropRotate(store.fileHash, store.cropRotate)
 }
 
 function loadImage(url: string) {
@@ -327,10 +335,7 @@ function onPointerMove(ev: PointerEvent) {
         }
     }
 
-    cropLeft.value = l
-    cropTop.value = t
-    cropRight.value = r2
-    cropBottom.value = b
+    setCropOnly({ left: l, top: t, right: r2, bottom: b })
     drawOverlay()
 }
 
@@ -341,17 +346,13 @@ function onPointerUp(ev: PointerEvent) {
     }
     if (drag) {
         drag = null
-        persist()
+        flushToCache()
     }
 }
 
 function resetCrop() {
-    cropLeft.value = 0
-    cropTop.value = 0
-    cropRight.value = 1
-    cropBottom.value = 1
-    rotationDeg.value = 0
-    persist()
+    store.resetCropRotate()
+    flushToCache()
     fitToContainer()
     redraw()
 }
@@ -360,10 +361,10 @@ function onRotationInput(v: number) {
     if (!Number.isFinite(v)) return
     // Clamp to [-180, 180] and normalise so the slider/spinbox can't escape.
     const clamped = Math.min(Math.max(v, -180), 180)
-    rotationDeg.value = clamped
+    setRotationOnly(clamped)
     fitToContainer()
     redraw()
-    persist()
+    flushToCache()
 }
 
 function rotateBy(delta: number) {
@@ -377,15 +378,11 @@ onMounted(() => {
         store.goToStep(4)
         return
     }
-    // Pre-fill from the store / cache so the user's previous crop &
-    // rotation come back when they re-enter the step.
+    // Hydrate the store from cache if we have one; otherwise the store
+    // already holds whatever was set the last time the user came through
+    // (or `IDENTITY_CROP_ROTATE` on a fresh session). Either way the
+    // computed refs above will surface the correct values.
     const cached = store.fileHash ? loadCropRotate(store.fileHash) : null
-    const seed = cached ?? store.cropRotate
-    rotationDeg.value = seed.rotationDeg
-    cropLeft.value = seed.crop.left
-    cropTop.value = seed.crop.top
-    cropRight.value = seed.crop.right
-    cropBottom.value = seed.crop.bottom
     if (cached) store.setCropRotate(cached)
 
     imgUrl.value = URL.createObjectURL(store.deskewResult.correctedImageBlob)
@@ -401,11 +398,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-    // If the user navigated away mid-drag (e.g. tapped Back during a corner
-    // pull), the local refs hold the latest crop coords but `persist()` only
-    // fires on `pointerup`. Flush here so cache + store match what was on
-    // screen.
-    persist()
+    // The store is already canonical (drag handlers wrote through), but
+    // localStorage only flushes on commit boundaries — if the user navigates
+    // away mid-drag, push the current store state to disk so the cache
+    // matches what's on screen.
+    flushToCache()
     resizeObs?.disconnect()
     if (imgUrl.value) URL.revokeObjectURL(imgUrl.value)
 })
@@ -420,7 +417,7 @@ watch([cropLeft, cropTop, cropRight, cropBottom], () => {
 })
 
 function next() {
-    persist()
+    flushToCache()
     store.goToStep(6)
 }
 </script>

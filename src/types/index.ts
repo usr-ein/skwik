@@ -144,20 +144,6 @@ export const IDENTITY_CROP_ROTATE: CropRotateState = {
     crop: { left: 0, top: 0, right: 1, bottom: 1 },
 }
 
-/** Pre-transform consumed by `CorrectedImageViewer`: maps measurement
- *  points from the original deskewed-image space onto the bitmap that
- *  is actually painted (which may be a rotated + cropped derivative).
- *  See `CorrectedImageViewer.vue` for the formula. */
-export interface ImagePreTransform {
-    rotationDeg: number
-    srcW: number
-    srcH: number
-    rotW: number
-    rotH: number
-    cropX: number
-    cropY: number
-}
-
 /** Pixels per mm in the output image. Default 10 (= 100 px/cm). */
 export const DEFAULT_SCALE_PX_PER_MM = 10
 

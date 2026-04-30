@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue"
 import { useMediaQuery } from "@vueuse/core"
 import { nanoid } from "nanoid"
-import type { ImagePreTransform, Point } from "@/types"
+import type { CropRotateState, Point } from "@/types"
 import type {
     LineMeasurement,
     RectMeasurement,
@@ -15,29 +15,32 @@ import { getDatumColor } from "@/lib/datums"
 import { useAppStore } from "@/stores/app"
 import { loadMeasurements, saveMeasurements } from "@/lib/measurement-cache"
 import { loadZoom, saveZoom } from "@/lib/zoom-cache"
+import { rotatedBboxSize, cropPixels } from "@/lib/crop-transform"
 
-// `imageTransform` is an optional pre-transform from
-// "deskewed-image space" (the original untransformed measurement
-// coordinate frame) to the bitmap space of the image actually shown
-// by `imageUrl`. Used by the Crop & Rotate step so measurements stay
-// anchored to the deskewed image while the user views a rotated +
-// cropped sub-bitmap. The mapping is:
+// `crop` is an optional pre-transform from "deskewed-image space" (the
+// original untransformed measurement coordinate frame) to the bitmap
+// space of the image actually shown by `imageUrl`. Used by the Crop &
+// Rotate step so measurements stay anchored to the deskewed image
+// while the user views a rotated + cropped sub-bitmap. The mapping is:
 //
 //   measurement_pt → rotate around (srcW/2, srcH/2) by rotationDeg
 //                  → translate by (rotW/2, rotH/2)
 //                  → subtract (cropX, cropY) → bitmap_pt
 //
-// When omitted (or set to identity values), behaviour is unchanged.
-//
-// The viewer does NOT rewrite stored measurement coordinates when the
-// transform changes; it only adjusts the draw-time projection. This is
-// option (b) from the task brief and means changing the crop/rotation
-// never invalidates persisted measurements.
+// When omitted, behaviour is identity. The viewer does NOT rewrite
+// stored measurement coordinates when the transform changes; it only
+// adjusts the draw-time projection (option (b) from the task brief),
+// so changing the crop/rotation never invalidates persisted
+// measurements.
 const props = defineProps<{
     imageUrl: string
     scalePxPerMm: number
-    /** Optional pre-transform; identity when not supplied. */
-    imageTransform?: ImagePreTransform
+    /** Cropping/rotation transform applied between the deskewed image
+     *  and the bitmap pointed at by `imageUrl`. The viewer derives the
+     *  pixel-space affine internally — callers only supply the
+     *  canonical state plus the source dimensions of the deskewed
+     *  bitmap. Omit for the legacy identity behaviour. */
+    crop?: { state: CropRotateState; srcW: number; srcH: number }
 }>()
 
 // Emit when the measurement set changes (add / mutate / delete) so the
@@ -384,43 +387,55 @@ function makeLiveCtx(): RenderCtx {
     }
 }
 
+// Pre-derived components of the crop pre-transform. Cached because
+// `imgPreTransform` is called per-vertex in inner draw loops and the
+// trig + bbox math don't change while the user is just panning the
+// canvas. Recomputed only when `props.crop` itself changes.
+const cropDerived = computed(() => {
+    const c = props.crop
+    if (!c) return null
+    const rot = rotatedBboxSize(c.srcW, c.srcH, c.state.rotationDeg)
+    const px = cropPixels(c.state, rot)
+    const r = (c.state.rotationDeg * Math.PI) / 180
+    return {
+        cx: c.srcW / 2,
+        cy: c.srcH / 2,
+        cos: Math.cos(r),
+        sin: Math.sin(r),
+        halfRotW: rot.rotW / 2,
+        halfRotH: rot.rotH / 2,
+        cropX: px.cropX,
+        cropY: px.cropY,
+    }
+})
+
 // Project a measurement point from deskewed-image space into the
-// shown bitmap's coordinate frame. When no `imageTransform` is set we
-// short-circuit to the identity for a tiny perf win and to keep the
-// behaviour pixel-identical for the legacy non-cropped path.
+// shown bitmap's coordinate frame. Returns the input unchanged when
+// no crop transform is configured — keeps the legacy non-cropped
+// path pixel-identical.
 function imgPreTransform(pt: Point): Point {
-    const tr = props.imageTransform
-    if (!tr) return pt
-    const r = (tr.rotationDeg * Math.PI) / 180
-    const cx = tr.srcW / 2
-    const cy = tr.srcH / 2
-    const dx = pt.x - cx
-    const dy = pt.y - cy
-    const cos = Math.cos(r)
-    const sin = Math.sin(r)
-    const rx = dx * cos - dy * sin + tr.rotW / 2
-    const ry = dx * sin + dy * cos + tr.rotH / 2
-    return { x: rx - tr.cropX, y: ry - tr.cropY }
+    const d = cropDerived.value
+    if (!d) return pt
+    const dx = pt.x - d.cx
+    const dy = pt.y - d.cy
+    const rx = dx * d.cos - dy * d.sin + d.halfRotW
+    const ry = dx * d.sin + dy * d.cos + d.halfRotH
+    return { x: rx - d.cropX, y: ry - d.cropY }
 }
 
 // Inverse of `imgPreTransform`: bitmap-space → deskewed-image space.
 // Used by `screenToImg` so pointer-driven placements / drags stay in
 // the canonical measurement coordinate frame.
 function imgPreTransformInverse(pt: Point): Point {
-    const tr = props.imageTransform
-    if (!tr) return pt
-    const r = (tr.rotationDeg * Math.PI) / 180
-    const cx = tr.srcW / 2
-    const cy = tr.srcH / 2
-    const rx = pt.x + tr.cropX
-    const ry = pt.y + tr.cropY
-    const dx = rx - tr.rotW / 2
-    const dy = ry - tr.rotH / 2
-    const cos = Math.cos(r)
-    const sin = Math.sin(r)
+    const d = cropDerived.value
+    if (!d) return pt
+    const rx = pt.x + d.cropX
+    const ry = pt.y + d.cropY
+    const dx = rx - d.halfRotW
+    const dy = ry - d.halfRotH
     return {
-        x: dx * cos + dy * sin + cx,
-        y: -dx * sin + dy * cos + cy,
+        x: dx * d.cos + dy * d.sin + d.cx,
+        y: -dx * d.sin + dy * d.cos + d.cy,
     }
 }
 
@@ -1874,6 +1889,19 @@ function pointerUp() {
     dragState = null
 }
 
+// Zoom anchoring needs the bitmap-space point under the cursor, not the
+// measurement-space point. `screenToImg` peels off the crop pre-transform
+// to return the latter, which is correct for measurement placement but
+// breaks the zoom-anchor math (`offset = screen - bitmap * scale`).
+// Without crop the two are equal, which is why the bug only shows up
+// once the user crops the deskew result.
+function screenToBitmap(sx: number, sy: number): Point {
+    return {
+        x: (sx - viewOffsetX.value) / viewScale.value,
+        y: (sy - viewOffsetY.value) / viewScale.value,
+    }
+}
+
 function onWheel(e: WheelEvent) {
     e.preventDefault()
     const scaleBy = 1.08
@@ -1884,11 +1912,11 @@ function onWheel(e: WheelEvent) {
     const clamped = Math.max(0.05, Math.min(20, newScale))
 
     const { x: px, y: py } = getCanvasXY(e)
-    const imgPt = screenToImg(px, py)
+    const bmp = screenToBitmap(px, py)
 
     viewScale.value = clamped
-    viewOffsetX.value = px - imgPt.x * clamped
-    viewOffsetY.value = py - imgPt.y * clamped
+    viewOffsetX.value = px - bmp.x * clamped
+    viewOffsetY.value = py - bmp.y * clamped
     redraw()
 }
 
@@ -2036,11 +2064,11 @@ function onTouchMove(e: TouchEvent) {
         if (!rect) return
         const cx = (t0.clientX + t1.clientX) / 2 - rect.left
         const cy = (t0.clientY + t1.clientY) / 2 - rect.top
-        const imgPt = screenToImg(cx, cy)
+        const bmp = screenToBitmap(cx, cy)
 
         viewScale.value = newScale
-        viewOffsetX.value = cx - imgPt.x * newScale
-        viewOffsetY.value = cy - imgPt.y * newScale
+        viewOffsetX.value = cx - bmp.x * newScale
+        viewOffsetY.value = cy - bmp.y * newScale
 
         lastPinchDist = dist
         redraw()
