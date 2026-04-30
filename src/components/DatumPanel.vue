@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from "vue"
 import { useAppStore } from "@/stores/app"
 import {
     RECT_PRESETS,
@@ -18,6 +19,53 @@ import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 
 const store = useAppStore()
+
+// Raw input buffers for the mm-dimension fields, keyed `${datumId}.${field}`.
+// We need a separate buffer because parsing "21," (a typo or a comma-locale
+// keystroke) gives NaN — without this map, writing NaN to the datum and
+// reading `String(d.widthMm)` back gives "NaN" in the input on next render,
+// which is worse than letting the user finish typing. The buffer is dropped
+// for a field whenever the stored numeric value diverges from the buffered
+// parse, signalling an external mutation (preset button, rect-dim swap).
+const dimRawInputs = ref(new Map<string, string>())
+
+function dimKey(id: string, field: string): string {
+    return `${id}.${field}`
+}
+
+type DimField = "widthMm" | "heightMm" | "lengthMm" | "diameterMm"
+
+function readDim(datum: Datum, field: DimField): number {
+    const stored = (datum as unknown as Record<string, unknown>)[field]
+    return typeof stored === "number" ? stored : NaN
+}
+
+function dimDisplay(datum: Datum, field: DimField): string {
+    const storedNum = readDim(datum, field)
+    const buffered = dimRawInputs.value.get(dimKey(datum.id, field))
+    if (buffered !== undefined) {
+        if (!Number.isFinite(storedNum) || Number(buffered) === storedNum) {
+            return buffered
+        }
+        // External mutation — drop the buffer so the new stored value
+        // shows up on the next render.
+        dimRawInputs.value.delete(dimKey(datum.id, field))
+    }
+    return Number.isFinite(storedNum) ? String(storedNum) : ""
+}
+
+function dimInput(datum: Datum, field: DimField, v: string | number) {
+    const raw = String(v)
+    dimRawInputs.value.set(dimKey(datum.id, field), raw)
+    // Number("") and Number("21,") both return NaN — the canProceedToStep4
+    // gate filters those out, so we don't have to here.
+    store.updateDatum(datum.id, { [field]: Number(raw) } as Partial<Datum>)
+}
+
+function dimValid(datum: Datum, field: DimField): boolean {
+    const stored = readDim(datum, field)
+    return Number.isFinite(stored) && stored > 0
+}
 
 function imageCenter() {
     const img = store.loadedImage
@@ -258,15 +306,18 @@ function axisBadge(datum: Datum): string | null {
                         <div>
                             <Label class="text-xs">Width (mm)</Label>
                             <Input
-                                :model-value="
-                                    String((datum as RectDatum).widthMm)
-                                "
-                                type="number"
-                                min="1"
+                                :model-value="dimDisplay(datum, 'widthMm')"
+                                type="text"
+                                inputmode="decimal"
                                 class="mt-1 h-8 text-sm"
+                                :class="
+                                    dimValid(datum, 'widthMm')
+                                        ? ''
+                                        : 'border-destructive ring-2 ring-destructive/30'
+                                "
                                 @update:model-value="
                                     (v: string | number) =>
-                                        updateField(datum, 'widthMm', Number(v))
+                                        dimInput(datum, 'widthMm', v)
                                 "
                                 @click.stop
                             />
@@ -299,19 +350,18 @@ function axisBadge(datum: Datum): string | null {
                         <div>
                             <Label class="text-xs">Height (mm)</Label>
                             <Input
-                                :model-value="
-                                    String((datum as RectDatum).heightMm)
-                                "
-                                type="number"
-                                min="1"
+                                :model-value="dimDisplay(datum, 'heightMm')"
+                                type="text"
+                                inputmode="decimal"
                                 class="mt-1 h-8 text-sm"
+                                :class="
+                                    dimValid(datum, 'heightMm')
+                                        ? ''
+                                        : 'border-destructive ring-2 ring-destructive/30'
+                                "
                                 @update:model-value="
                                     (v: string | number) =>
-                                        updateField(
-                                            datum,
-                                            'heightMm',
-                                            Number(v),
-                                        )
+                                        dimInput(datum, 'heightMm', v)
                                 "
                                 @click.stop
                             />
@@ -320,13 +370,18 @@ function axisBadge(datum: Datum): string | null {
                     <div v-else-if="datum.type === 'line'">
                         <Label class="text-xs">Length (mm)</Label>
                         <Input
-                            :model-value="String(datum.lengthMm)"
-                            type="number"
-                            min="1"
+                            :model-value="dimDisplay(datum, 'lengthMm')"
+                            type="text"
+                            inputmode="decimal"
                             class="mt-1 h-8 text-sm"
+                            :class="
+                                dimValid(datum, 'lengthMm')
+                                    ? ''
+                                    : 'border-destructive ring-2 ring-destructive/30'
+                            "
                             @update:model-value="
                                 (v: string | number) =>
-                                    updateField(datum, 'lengthMm', Number(v))
+                                    dimInput(datum, 'lengthMm', v)
                             "
                             @click.stop
                         />
@@ -334,14 +389,18 @@ function axisBadge(datum: Datum): string | null {
                     <div v-else>
                         <Label class="text-xs">Diameter (mm)</Label>
                         <Input
-                            :model-value="String(datum.diameterMm)"
-                            type="number"
-                            min="1"
-                            step="0.01"
+                            :model-value="dimDisplay(datum, 'diameterMm')"
+                            type="text"
+                            inputmode="decimal"
                             class="mt-1 h-8 text-sm"
+                            :class="
+                                dimValid(datum, 'diameterMm')
+                                    ? ''
+                                    : 'border-destructive ring-2 ring-destructive/30'
+                            "
                             @update:model-value="
                                 (v: string | number) =>
-                                    updateField(datum, 'diameterMm', Number(v))
+                                    dimInput(datum, 'diameterMm', v)
                             "
                             @click.stop
                         />

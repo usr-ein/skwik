@@ -33,9 +33,16 @@ export const useAppStore = defineStore("app", () => {
     const canProceedToStep4 = computed(() => {
         if (!canProceedToStep3.value || datums.value.length === 0) return false
         return datums.value.every((d) => {
-            if (d.type === "rectangle") return d.widthMm > 0 && d.heightMm > 0
-            if (d.type === "line") return d.lengthMm > 0
-            return d.diameterMm > 0
+            if (d.type === "rectangle")
+                return (
+                    Number.isFinite(d.widthMm) &&
+                    d.widthMm > 0 &&
+                    Number.isFinite(d.heightMm) &&
+                    d.heightMm > 0
+                )
+            if (d.type === "line")
+                return Number.isFinite(d.lengthMm) && d.lengthMm > 0
+            return Number.isFinite(d.diameterMm) && d.diameterMm > 0
         })
     })
     const canProceedToStep5 = computed(
