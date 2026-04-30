@@ -32,6 +32,11 @@ const overlayRef = ref<HTMLCanvasElement | null>(null)
 
 const img = ref<HTMLImageElement | null>(null)
 const imgUrl = ref<string | null>(null)
+// Set when the deskew blob fails to decode — corrupt result, OOM in the
+// decoder, or unsupported format. We surface a small fallback UI so the
+// user can navigate back to step 4 and retry instead of staring at a
+// permanently blank canvas.
+const loadError = ref(false)
 
 // Rotation in degrees. Crop fractions of the rotated bbox.
 const rotationDeg = ref(0)
@@ -73,9 +78,13 @@ function persist() {
 function loadImage(url: string) {
     const el = new Image()
     el.onload = () => {
+        loadError.value = false
         img.value = el
         fitToContainer()
         redraw()
+    }
+    el.onerror = () => {
+        loadError.value = true
     }
     el.src = url
 }
@@ -392,6 +401,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+    // If the user navigated away mid-drag (e.g. tapped Back during a corner
+    // pull), the local refs hold the latest crop coords but `persist()` only
+    // fires on `pointerup`. Flush here so cache + store match what was on
+    // screen.
+    persist()
     resizeObs?.disconnect()
     if (imgUrl.value) URL.revokeObjectURL(imgUrl.value)
 })
@@ -500,6 +514,24 @@ function next() {
                         @pointerup="onPointerUp"
                         @pointercancel="onPointerUp"
                     />
+                    <div
+                        v-if="loadError"
+                        class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/90 p-6 text-center"
+                    >
+                        <p class="text-sm font-medium text-destructive">
+                            Failed to load the deskew result.
+                        </p>
+                        <p class="text-xs text-muted-foreground">
+                            The image blob couldn't be decoded. Re-run the
+                            perspective correction in the previous step.
+                        </p>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            @click="store.goToStep(4)"
+                            >Back to Deskew</Button
+                        >
+                    </div>
                 </div>
             </CardContent>
         </Card>
